@@ -1,0 +1,72 @@
+---
+title: "Fig S2: Change in territory size over time"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{FigS2}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Load packages and ggplot themes
+
+```{r}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+
+library(ggplot2)
+library(dplyr)
+library(extrafont)
+library(MyFuncs)
+
+```
+
+```{r}
+
+data("Territories")
+
+TERR <- Territories@data
+
+#We remove all records with no area measurement, and standardise it to cm above MHT.
+
+TERR2 <- subset(TERR, is.na(Area) == FALSE)
+
+```
+
+Summarise data per year per status
+
+```{r}
+
+plot_dat <- TERR2 %>% 
+  group_by(Year, Status) %>% 
+  summarise(Mean = mean(Area),
+            SE = sd(Area)/sqrt(n()))
+
+plot_dat$Year <- as.numeric(as.character(plot_dat$Year))
+
+```
+
+Plot data
+
+```{r, fig.height = 5, fig.width = 5}
+
+ggplot(data = plot_dat)+
+  geom_errorbar(aes(x = Year, ymin = Mean - SE, ymax = Mean + SE), width = 0.5, size = 1)+
+  geom_point(aes(x = Year, y = Mean, fill = Status), shape = 21, size = 3, stroke = 1)+
+  scale_fill_manual(values = c("dark grey", "black"))+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans")) +
+  scale_x_continuous(breaks = seq(1985, 2015, 5))+
+  ylab("Territory area (m2)")+
+  xlab("")
+
+```
+
+```{r}
+
+#Save as both tiff and pdf
+ggsave("../plots/Figure_S2.pdf", width = 17, height = 13, units = "cm", dpi = 600)
+
+```

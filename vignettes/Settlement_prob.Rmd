@@ -1,0 +1,304 @@
+---
+title: "Change in settlement patterns"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Settlement}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+
+library(MyFuncs)
+library(ggplot2)
+library(dplyr)
+
+```
+
+##50x50
+
+We load our data that was prepared in prepare_data.Rmd
+
+```{r}
+
+data("SETTLE_poisson")
+
+```
+
+Firstly, we want to fit a model with year*elev term to quantify any potential change in the relationship between settlement and elevation over time.
+
+To improve convergence we want to scale all our variables. We will keep them positive to allow us to consider logarithmic relationships.
+
+The 'standard.log' transformation I used here centres by mean and scales to 1 SD, but then adds min + 1 to make all values > 0.
+
+```{r}
+
+SETTLE_poisson$Median3 <- transform(x = SETTLE_poisson$Median2, type = "standard.log")
+SETTLE_poisson$Grid_area2   <- transform(x = SETTLE_poisson$Grid_area, type = "standard")
+SETTLE_poisson$Year_group <- SETTLE_poisson$Year - min(SETTLE_poisson$Year)
+
+```
+
+We fit our model using spaMM and just treating it as a logistic regression.
+
+```{r}
+
+library(spaMM)
+library(lme4)
+full_mod <- fitme(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + (1|Sub_Area),
+                  data = SETTLE_poisson, family = binomial(logit), method = "PQL/L")
+
+```
+
+```{r, fig.width = 7, fig.height = 5}
+
+SETTLE_poisson %>%
+  ungroup() %>%
+  mutate(logits = c(predict(full_mod)),
+         Median2 = log(Median2)) %>%
+  dplyr::select(logits, Year, Median2, Grid_area2) %>%
+  tidyr::gather(key = "Predictor", value = "Pred_value", -logits) %>%
+  ggplot()+
+  geom_point(aes(x = Pred_value, y = logits))+
+  facet_wrap(facets = ~Predictor, scales = "free_x")
+
+```
+
+Looks fine.
+
+```{r}
+
+summary(full_mod)
+
+```
+
+Test residuals using DHARMa package
+
+```{r, message = FALSE, fig.width = 7, fig.height = 5}
+
+library(DHARMa)
+
+set.seed(666)
+
+simResiduals <- simulateResiduals(fittedModel = full_mod, n = 5000)
+
+plotSimulatedResiduals(simulationOutput = simResiduals)
+
+```
+
+Test VIF
+
+```{r}
+
+car::vif(glm(lgl_Settle ~ log(Median3) + Year_group + Grid_area2, family = "binomial", data = SETTLE_poisson))
+
+```
+
+VIF is fine.
+
+---------------------
+
+With plotly
+
+```{r, fig.width = 7, fig.height = 5}
+
+library(plotly)
+
+new_dat <- expand.grid(Median3 = seq(min(SETTLE_poisson$Median3),
+                                     max(SETTLE_poisson$Median3), length.out = 100),
+                       Year_group = seq(min(SETTLE_poisson$Year_group),
+                                        max(SETTLE_poisson$Year_group), 1),
+                       Grid_area2 = mean(SETTLE_poisson$Grid_area2), Coast_Dist2 = 1,
+                       Gully_Dist2 = 1)
+
+new_dat$pred <- as.numeric(predict(full_mod, newdata = new_dat, re.form = NA)[, 1])
+new_dat$Median2 <- back.transform(x = new_dat$Median3,
+                                  y = SETTLE_poisson$Median2,
+                                  type = "standard.log")
+
+(Fig2 <- plot_ly(new_dat, x = ~Year_group, y = ~Median2, z = ~pred, type = "contour", showlegend = F, 
+        hoverlabel = list(font =  list(family = "Ubuntu")),
+        contours = list(coloring = "fill",
+                        showlabels = TRUE,
+                        labelfont = list(family = "Ubuntu",
+                                         size = 15,
+                                         color = "white")),
+        colorbar = list(tickfont = list(family = "Ubuntu",
+                                        size = 20),
+                        title = "Settlement \n probability",
+                        titlefont = list(family = "Ubuntu",
+                                         size = 15))) %>%
+  layout(xaxis = list(title = "Year",
+                  titlefont = list(family = "Ubuntu",
+                                   size = 20),
+                  tickmode = "array",
+                  tickvals = seq(1985, 2015, 5) - min(SETTLE_poisson$Year),
+                  ticktext = seq(1985, 2015, 5)),
+         yaxis = list(title = "Elevation (cm above MHT)",
+                      titlefont = list(family = "Ubuntu",
+                                   size = 20))))
+
+```
+
+**SAVING AS PDF IS NOT POSSIBLE IN R WITHOUT A PLOTLY PREMIUM SUBSCRICPTION**
+**WE EXPORT THE IMAGE TO WEB AND SAVE AS PDF FROM THERE**
+
+Finally, we want to determine 95 and 99.5% confidence intervals for each point.
+
+To do this, we will refit our model with lme4 because the confint method with spaMM doesn't work well (keeps crashing). The estimations should be identical, but we use spaMM above because it can fit models much more quickly.
+
+*N.B.* glmer throws a convergence warning, but model is able to produce identical estimates to spaMM. lme4 is known to be overly conservative with throwing convergence warnings.
+
+```{r}
+
+library(kableExtra)
+
+CI_mod <- glmer(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + (1|Sub_Area),
+                  data = SETTLE_poisson, family = binomial(logit))
+
+CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
+             confint(CI_mod, level = 0.995, method = "Wald")[-1, ])) %>%
+  mutate(CI95 = paste(round(`2.5 %`, 4), round(`97.5 %`, 4), sep = "/"),
+         CI995 = paste(round(`0.25 %`, 4), round(`99.75 %`, 4), sep = "/"),
+         Estimate = as.numeric(fixef(CI_mod)),
+         Variable = names(fixef(CI_mod))) %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
+
+CI_25ha <- CIs %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
+
+```
+
+Determine R2 values for reviewers. To do this we need to use our lme4 model.
+
+Add this to our CI estimates.
+
+```{r}
+
+R2 <- MuMIn::r.squaredGLMM(CI_mod)
+
+CI_25ha %>% 
+  mutate(R2m = round(R2[1, "R2m"], 2),
+         R2c = round(R2[1, "R2c"], 2)) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = "bordered")
+
+```
+
+-------------
+
+#100x100m coarser grid
+
+We load our data that was prepared in prepare_data.Rmd
+
+```{r}
+
+data("SETTLE_poisson_100")
+
+```
+
+```{r}
+
+SETTLE_poisson_100$Median3 <- transform(x = SETTLE_poisson_100$Median2, type = "standard.log")
+SETTLE_poisson_100$Grid_area2   <- transform(x = SETTLE_poisson_100$Grid_area, type = "standard")
+SETTLE_poisson_100$Year_group <- SETTLE_poisson_100$Year - min(SETTLE_poisson_100$Year)
+
+```
+
+We fit our model using spaMM and just treating it as a logistic regression.
+
+```{r}
+
+library(spaMM)
+full_mod_100 <- fitme(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + (1|Sub_Area),
+                  data = SETTLE_poisson_100, family = binomial(logit), method = "PQL/L")
+
+```
+
+```{r, fig.width = 7, fig.height = 5}
+
+SETTLE_poisson_100 %>%
+  ungroup() %>%
+  mutate(logits = c(predict(full_mod_100))) %>%
+  dplyr::select(logits, Year, Median2, Grid_area2) %>%
+  tidyr::gather(key = "Predictor", value = "Pred_value", -logits) %>%
+  ggplot()+
+  geom_point(aes(x = Pred_value, y = logits))+
+  facet_wrap(facets = ~Predictor, scales = "free_x")
+
+```
+
+Seems somewhat better.
+
+```{r}
+
+summary(full_mod_100)
+
+```
+
+Test residuals using DHARMa package
+
+```{r, message = FALSE, fig.width = 7, fig.height = 5}
+
+library(DHARMa)
+
+set.seed(666)
+
+simResiduals <- simulateResiduals(fittedModel = full_mod_100, n = 5000)
+
+plotSimulatedResiduals(simulationOutput = simResiduals)
+
+```
+
+Test VIF
+
+```{r}
+
+car::vif(glm(lgl_Settle ~ log(Median3) + Year_group + Grid_area2, family = "binomial", data = SETTLE_poisson_100))
+
+```
+
+VIF is fine.
+
+---------------------
+
+Finally, we want to determine 95 and 99.5% confidence intervals for each point.
+
+To do this, we will refit our model with lme4 (see discussion above for 50m)
+
+```{r}
+
+library(kableExtra)
+
+CI_mod <- glmer(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + (1|Sub_Area),
+                  data = SETTLE_poisson_100, family = binomial(logit))
+
+CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
+             confint(CI_mod, level = 0.995, method = "Wald")[-1, ])) %>%
+  mutate(CI95 = paste(round(`2.5 %`, 4), round(`97.5 %`, 4), sep = "/"),
+         CI995 = paste(round(`0.25 %`, 4), round(`99.75 %`, 4), sep = "/"),
+         Estimate = as.numeric(fixef(CI_mod)),
+         Variable = names(fixef(CI_mod))) %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
+
+CI_100ha <- CIs %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
+
+```
+
+```{r}
+
+R2 <- MuMIn::r.squaredGLMM(CI_mod)
+
+CI_100ha %>% 
+  mutate(R2m = round(R2[1, "R2m"], 2),
+         R2c = round(R2[1, "R2c"], 2)) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = "bordered")
+
+```

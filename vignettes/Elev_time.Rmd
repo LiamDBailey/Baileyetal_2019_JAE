@@ -1,0 +1,333 @@
+---
+title: "Elevation change"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{ElevationChange}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+To begin our paper we want to test if there is a change in the population nest elevation over time.
+
+```{r}
+
+devtools::load_all()
+
+library(spaMM)
+library(lme4)
+library(ggplot2)
+library(extrafont)
+library(MuMIn)
+library(nlme)
+library(dplyr)
+library(purrr)
+
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+library(MyFuncs)
+
+```
+
+## Load data
+
+```{r}
+
+#Load data (includes 2014 and LiDAR years)
+#This data is taken from Nest_elevationation_Zonal_LayDate_Status_full.csv in PhD\Data\Nest Nest_elevationation\R
+#N.B. This data includes unique values for all ONADs, meaning we can
+#use it for basic plasticity measure.
+data("Nest_elevation")
+
+#Make into units above 1971 MHT (90cm)
+Nest_elevation <- Nest_elevation %>%
+  mutate(#Make elevation cm above 1971 MHT
+         Z_min = Z - 90,
+         #Start Year at 0 (i.e. 1995 = 0)
+         Year1 = Year - min(Year),
+         #MaleID as factors
+         MaleID = factor(MaleID),
+         #Replace Be/Bw as just B. Do the same for F
+         Area = factor(pmap_chr(.l = list(Area = Area),
+                                .f = function(Area){
+                                 
+                                  return(ifelse(grepl("B", Area), "B", ifelse(grepl("F", Area), "F", as.character(Area)))) 
+                                  
+                                })),
+         AreaB = factor(pmap_chr(.l = list(Area = as.character(Area)),
+                          .f = ~ifelse(.x == "B", "SeaWall", "NonSeawall"))))
+
+```
+
+We use the random effects structure determined previously (see Methods files for Nest Nest_elevationation paper). This includes AreaID and MaleID.
+
+---------------------
+
+Test whether we meet assumptions of normality and heteroskedasticity with regular elevation.
+
+```{r, fig.height=5, fig.width=7}
+
+mod1 <- lmer(Z_min ~ Year1 + Method + (1|Area) + (1|MaleID),
+            data = Nest_elevation, REML = TRUE)
+
+qqnorm(residuals(mod1))
+qqline(residuals(mod1))
+
+```
+
+Unsurprisingly, it's strongly skewed towards high values (due to seawall).
+
+```{r}
+
+hist(residuals(mod1), breaks = 50)
+
+```
+
+We can consider using boxcox transformation.
+
+```{r}
+
+(lambda <- car::powerTransform(mod1)[[1]])
+
+Nest_elevation$Z_bc <- car::bcPower(U = Nest_elevation$Z_min, lambda = lambda)
+
+```
+
+```{r, fig.height=5, fig.width=7}
+
+mod2 <- lmer(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+            data = Nest_elevation, REML = TRUE)
+
+qqnorm(residuals(mod2))
+qqline(residuals(mod2))
+
+```
+
+Estimate R2
+
+```{r}
+
+MuMIn::r.squaredGLMM(mod2)
+
+```
+
+```{r}
+
+hist(residuals(mod2), breaks = 50)
+
+```
+
+There is still some extremes, but the distribution is much more symmetrical. This will make it difficult to make predictions (our model will tend to be too conservative and not consider extreme cases), but it should be fine to estimate our model coefficients because the distribution is symmetrical so there is no systematic bias in either direction.
+
+##Consider heteroskedasticity
+
+Next, want to test to see if there is heteroskedacisity in our elevation data
+
+```{r}
+
+Hetero_mod <- spaMM::fitme(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+                           resid.model = ~ Method, data = Nest_elevation)
+
+Homo_mod <- spaMM::fitme(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+                         data = Nest_elevation)
+
+#Conduct likelihood ratio test assuming chisq with 1 df
+1 - pchisq(q = 2 * (logLik(Hetero_mod) - logLik(Homo_mod)), df = 1)
+
+```
+
+We can see that accounting for heteroskedacisity between sampling methods is important.
+
+--------------------------------
+
+##Test for changes in elevation over time
+
+We have transformed our data and accounted for heteroskedasticity. Now we want to look at the year effect.
+
+```{r}
+
+H1 <- spaMM::fitme(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+            data = Nest_elevation, resid.model = ~Method,
+            method = "REML")
+
+summary(H1)
+
+```
+
+Use LRT to determine significance of our terms.
+
+```{r}
+
+full_mod <- spaMM::fitme(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+            data = Nest_elevation, resid.model = ~Method,
+            method = "ML")
+
+noyr_mod <- spaMM::fitme(Z_bc ~ Method + (1|Area) + (1|MaleID),
+            data = Nest_elevation, resid.model = ~Method,
+            method = "ML")
+
+nomethod_mod <- spaMM::fitme(Z_bc ~ Year1 + (1|Area) + (1|MaleID),
+            data = Nest_elevation, resid.model = ~Method,
+            method = "ML")
+
+pval_yr <- 1 - pchisq(q = 2 * (logLik(full_mod) - logLik(noyr_mod)), df = 1)
+pval_method <- 1 - pchisq(q = 2 * (logLik(full_mod) - logLik(nomethod_mod)), df = 1)
+
+tibble(variable = c("Year", "Method"), pval = c(pval_yr, pval_method))
+
+```
+
+The slope of year is significant, using alpha 0.05 and 0.005 (Benjamin et al. 2017). Elevation has increased over time.
+
+The method used to measure nests is also significant. Measurements with LIDAR are higher than those measured in-situ.
+
+## Plot results
+
+Plotting:
+
+We want to show that, despite our lack of evidence for a within-individual effect, there is still a population effect (i.e. model H2). i.e. we just want a plot that shows that elevation has increased over time!!!
+
+```{r, fig.height = 5, fig.width=5}
+
+model_pred <- Nest_elevation %>%
+  mutate(Area = "E", Method = "DGPS")
+model_pred$pred <- car::bcnPowerInverse(predict(H1, newdata = model_pred)[, 1], lambda = lambda, gamma = 0)
+
+plot_data <- model_pred %>%
+  group_by(Year1) %>%
+  summarise(mean = mean(pred),
+            SE = sd(pred)/sqrt(n()),
+            lower = mean - SE, upper = mean + SE,
+            n = n())
+
+line <- expand.grid(Area = "E", Method = "DGPS", Year1 = seq(0, 21, 1)) %>% 
+  mutate(pred = car::bcnPowerInverse(as.numeric(predict(H1, newdata = ., re.form = ~1 + (1|Area))[, 1]), lambda = lambda, gamma = 0),
+         lower = car::bcnPowerInverse(as.numeric(attr(predict(H1, newdata = ., re.form = ~1 + (1|Area), intervals = "predVar"), "intervals")[, 1]), lambda = lambda, gamma = 0),
+         upper = car::bcnPowerInverse(as.numeric(attr(predict(H1, newdata = ., re.form = ~1 + (1|Area), intervals = "predVar"), "intervals")[, 2]), lambda = lambda, gamma = 0))
+
+ggplot(plot_data)+
+  geom_ribbon(data = line, aes(x = Year1, ymin = lower, ymax = upper), fill = "dark grey", col = NA, alpha = 0.25)+
+  geom_path(data = line, aes(x = Year1, y = pred), lty = 2, size = 1, col = "black")+
+  geom_errorbar(aes(x = Year1, ymin = lower, ymax = upper), width = 0.35, size = 0.75)+
+  geom_point(aes(x = Year1, y = mean), shape = 21, size = 3, fill = "white", stroke = 1.1)+
+  geom_text(data = plot_data, aes(x = Year1, y = lower - 1, label = n), size = 3, family = "sans")+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans"))+
+  scale_x_continuous(breaks = c(0, 5, 10, 15, 20), labels = c("1995", "2000", "2005", "2010", "2015"))+
+  ylab("Nest elevation \n (cm above 1971 mean tide)")+
+  xlab("Year")
+
+#Save as both tiff and pdf
+ggsave("../plots/Figure_1.pdf", width = 17, height = 15, units = "cm", dpi = 600)
+
+```
+
+Create a plot with fully raw data (i.e. not conditional on study area). This is important for transparency, but will be in the supplementary material.
+
+```{r, fig.height = 5, fig.width = 5}
+
+plot_data <- Nest_elevation %>% 
+  group_by(Year1) %>% 
+  summarise(mean = mean(Z_min),
+            SE = sd(Z_min)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE,
+            n = n())
+
+line <- expand.grid(Method = "LID", Year1 = seq(0, 21, 1)) %>% 
+  mutate(pred = car::bcnPowerInverse(as.numeric(predict(H1, newdata = ., re.form = NA)[, 1]), lambda = lambda, gamma = 0),
+         lower = car::bcnPowerInverse(as.numeric(attr(predict(H1, newdata = ., re.form = NA, intervals = "predVar"), "intervals")[, 1]), lambda = lambda, gamma = 0),
+         upper = car::bcnPowerInverse(as.numeric(attr(predict(H1, newdata = ., re.form = NA, intervals = "predVar"), "intervals")[, 2]), lambda = lambda, gamma = 0))
+
+ggplot(plot_data)+
+  geom_ribbon(data = line, aes(x = Year1, ymin = lower, ymax = upper), fill = "dark grey", col = NA, alpha = 0.25)+
+  geom_path(data = line, aes(x = Year1, y = pred), lty = 2, size = 1, col = "black")+
+  geom_errorbar(aes(x = Year1, ymin = lower, ymax = upper), width = 0.35, size = 0.75)+
+  geom_point(aes(x = Year1, y = mean), shape = 21, size = 3, fill = "white", stroke = 1.1)+
+  geom_text(data = plot_data, aes(x = Year1, y = lower - 1, label = n), size = 3, family = "sans")+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans"))+
+  scale_x_continuous(breaks = c(0, 5, 10, 15, 20), labels = c("1995", "2000", "2005", "2010", "2015"))+
+  ylab("Nest elevation \n (cm above 1971 mean tide)")+
+  xlab("Year")
+
+ggsave("../plots/Figure_S5.pdf", width = 17, height = 15, units = "cm", dpi = 600)
+
+```
+
+Determine elevation change over time. N.B. This will not be a single value due to Box-Cox transformation.
+
+```{r}
+
+library(car)
+
+elev_change <- pmap_dbl(.l = list(Year1 = 1:max(Nest_elevation$Year1)),
+                        .f = function(Year1){
+                          
+                          old <- bcnPowerInverse(fixef(H1)[1] + fixef(H1)[2]*(Year1 - 1), lambda = lambda, gamma = 0)
+                          
+                          new <- bcnPowerInverse(fixef(H1)[1] + fixef(H1)[2]*Year1, lambda = lambda, gamma = 0)
+                          
+                          return(new - old)
+                          
+                        })
+
+range(elev_change)
+
+```
+
+```{r}
+
+mean(elev_change)
+
+```
+
+Estimate elevation difference with measurement method.
+
+```{r}
+
+old <- bcnPowerInverse(fixef(H1)[1], lambda = lambda, gamma = 0)
+
+new <- bcnPowerInverse(fixef(H1)[1] + fixef(H1)[3], lambda = lambda, gamma = 0)
+
+new - old
+
+```
+
+Extract model coefficients and CIs.
+
+```{r}
+
+library(kableExtra)
+
+CIs <- tibble(Variable = names(fixef(H1)),
+              Estimate = format(fixef(H1)))
+
+#Refit with ML
+H1_ML <- fitme(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+            data = Nest_elevation, resid.model = ~Method,
+            method = "ML")
+
+intervals <- pmap(.l = list(parm = as.character(CIs$Variable)),
+     .f = function(parm){
+       
+       x95 <- confint(H1_ML, parm = parm, level = 0.95, verbose = FALSE)
+       
+       x995 <- confint(H1_ML, parm = parm, level = 0.995, verbose = FALSE)
+       
+       return(c(x95$interval, x995$interval))
+       
+     })
+
+CIs <- CIs %>% 
+  mutate(CI95 = pmap_chr(.l = list(intervals),
+                          .f = ~paste(format(..1[1], nsmall = 2), format(..1[2], nsmall = 2), sep = "/")),
+         CI995 = pmap_chr(.l = list(intervals),
+                          .f = ~paste(format(..1[3], nsmall = 2), format(..1[4], nsmall = 2), sep = "/")))
+
+CIs %>% 
+  kable() %>%
+  kable_styling(bootstrap_options = "bordered")
+  
+
+```

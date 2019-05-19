@@ -1,0 +1,73 @@
+---
+title: "FigS6: Territory vacation over time"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{FigS6}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Load ggplot themes
+
+```{r}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs")
+
+library(ggplot2)
+library(dplyr)
+library(MyFuncs)
+library(extrafont)
+
+```
+
+Load data
+
+```{r}
+
+data("VacatedTerritories")
+
+```
+
+Create summary of number of abandonments
+
+```{r}
+
+plot_dat <- VacatedTerritories %>% 
+  #Change name of status to be more understandable
+  rowwise() %>% 
+  mutate(Status = ifelse(Status == "leapfrog", "Inland", "Coastal")) %>% 
+  ungroup() %>% 
+  group_by(Year, Status) %>% 
+  summarise(Perc_vacated = (sum(Vacated)/n()) * 100)
+
+```
+
+Generate plot
+
+```{r, fig.height = 4, fig.width = 6}
+
+ggplot(data = plot_dat)+
+  geom_line(aes(x = Year, y = Perc_vacated), lty = 2)+
+  geom_point(aes(x = Year, y = Perc_vacated, fill = Status), shape = 21, size = 3, stroke = 1)+
+  facet_wrap(facets = ~Status)+
+  scale_fill_manual(values = c("black", "dark grey"))+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans"))+
+  xlab("")+
+  ylab("Percentage of territories vacated")+
+  scale_y_continuous(limits = c(0, 100))+
+  scale_x_continuous(breaks = seq(1985, 2015, 5))+
+  theme(strip.background = element_rect(fill = "white", colour = "black"),
+        strip.text = element_text(size = rel(0.8), colour = "black", face = "bold"),
+        panel.border = element_rect(fill = NA, colour = "black"))
+
+```
+
+```{r}
+
+ggsave("../plots/Figure_S6.pdf", width = 20, height = 12, units = "cm", dpi = 600)
+
+```

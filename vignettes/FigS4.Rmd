@@ -1,0 +1,113 @@
+---
+title: "FigS4: Territory movement of breeding birds"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{FigS4}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+In this code, we determine the median maximum territory movement for males over their lifetime.
+
+###Load packages
+
+```{r, echo = FALSE, message = FALSE}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+
+#Load libraries
+library(raster)
+library(rgdal)
+library(deldir)
+library(rgeos)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(extrafont)
+library(MyFuncs)
+
+```
+
+###Load territory polygons
+
+```{r}
+
+#Load territory data
+data("Territories")
+
+```
+
+```{r}
+
+#Estimate max distance for each individual male over its recorded lifetime.
+males <- subset(Territories, !is.na(MaleCode))
+
+#Rework the data to be a spatial points datafame (i.e. territory centre points)
+males <- SpatialPointsDataFrame(coords = males[, c("X", "Y")], data = males@data,
+                               proj4string = crs(males))
+males$Year <- as.numeric(males$Year)
+
+#Map through all male IDs and determine their max territory range
+all_dist <- pmap_df(.l = list(name = unique(males$MaleCode)),
+                    .f = function(name, input_data){
+                      
+                      #Subset to just be one male
+                      one_male <- input_data[input_data$MaleCode == name, ]
+                      
+                      #If there's only one territory then return NA
+                      if(nrow(one_male) == 1){
+                        
+                        return(tibble(name = name, dist = NA, sex = "M", time = NA))
+                        
+                      } else {
+                        
+                        #determine distance of all territories
+                        male_dist <- gDistance(one_male, byid = TRUE)
+                        
+                        return(tibble(name = name, dist = max(male_dist), sex = "M", time = max(one_male$Year) - min(one_male$Year)))
+                        
+                      }
+                      
+                    }, input_data = males)
+
+```
+
+```{r}
+
+#Determine median max movement
+#Need to remove NAs for individuals only sighted once.
+(pop_med <- median(all_dist$dist, na.rm = T))
+
+```
+
+```{r}
+(move_hist <- ggplot()+
+  geom_histogram(data = filter(all_dist, !is.na(dist)),
+                 aes(x = dist), fill = "dark grey", bins = 25, colour = "black") +
+  geom_vline(xintercept = pop_med, lty = 2, size = 1, colour = "black")+
+  scale_x_continuous(breaks = seq(0, 3000, 250))+
+  labs(x = "Maximum lifetime territory movement (m)", y = "Number of individuals")+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans"))+
+  theme(legend.position = "None",
+  plot.margin = margin(0, 0.5, 0, 0, "cm")))
+
+```
+
+```{r}
+
+#Save as pdf
+ggsave("../plots/Figure_S4.pdf", width = 17, height = 15, units = "cm", dpi = 600)
+
+```
+
+```{r}
+
+#Number of males used
+filter(all_dist, !is.na(dist)) %>% 
+  nrow()
+
+```

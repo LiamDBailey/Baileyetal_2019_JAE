@@ -1,0 +1,549 @@
+---
+title: "Cue analysis"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{CueAnalysis}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, echo = FALSE, message = FALSE}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "nevers")
+
+#Load libraries
+library(raster)
+library(rgdal)
+library(deldir)
+library(rgeos)
+library(lme4)
+library(MuMIn)
+library(sjPlot)
+library(piecewiseSEM)
+library(extrafont)
+library(plotly)
+library(webshot)
+library(RSelenium)
+library(DHARMa)
+library(dplyr)
+library(car)
+library(foreach)
+library(purrr)
+library(MyFuncs)
+
+```
+
+Load the settlement data
+
+```{r}
+
+data("SETTLE_poisson")
+
+```
+
+Now we know that settlement patterns have changed over time (i.e. elevation doesn't affect settlement in the same way in later years).
+
+Next, we want to consider what cues might be used to inform settlement behaviour.
+
+We consider 4 potential cues:
+- Direct elevation cue
+- Food availability cue (i.e. coast/gully distance)
+- Conspecific attraction (territory density in previous year)
+- Conspecific reproductive experience (Relative fledgling success in the area in previous year)
+
+```{r}
+
+SETTLE_poisson$Median3 <- transform(x = SETTLE_poisson$Median2, type = "standard.log")
+SETTLE_poisson$Gully_Dist2 <- transform(x = SETTLE_poisson$Gully_Dist, type = "standard.log")
+SETTLE_poisson$Coast_Dist2  <- transform(x = SETTLE_poisson$Coast_Dist, type = "standard.log")
+SETTLE_poisson$Grid_area2   <- transform(x = SETTLE_poisson$Grid_area, type = "standard")
+SETTLE_poisson$Year_group <- SETTLE_poisson$Year - min(SETTLE_poisson$Year)
+
+```
+
+We are going to consider density and fledgling data over the past 3 years (rather than just 1). This is a compromise between including more years and keeping similar sample size.
+
+```{r}
+
+SETTLE_poisson <- filter(SETTLE_poisson, !is.na(rel_density3yr))
+
+```
+
+```{r}
+
+library(spaMM)
+full_mod <- fitme(lgl_Settle ~ Year_group * log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + rel_fledge_est3yr + rel_density3yr + Grid_area2 + (1|Sub_Area),
+                  data = SETTLE_poisson, family = binomial(logit), method = "PQL/L")
+
+```
+
+Assess linearity of relationships
+
+```{r, fig.width = 7, fig.height = 5}
+
+SETTLE_poisson %>%
+  ungroup() %>%
+  mutate(logits = c(predict(full_mod)), Median2 = log(Median2)) %>%
+  select(logits, Year, Median2, rel_fledge_est3yr, rel_density3yr) %>%
+  tidyr::gather(key = "Predictor", value = "Pred_value", -logits) %>%
+  ggplot()+
+  geom_point(aes(x = Pred_value, y = logits))+
+  facet_wrap(facets = ~Predictor, scales = "free_x")
+
+```
+
+Test residuals using DHARMa package
+
+```{r, message = FALSE, fig.width = 7, fig.height = 5}
+
+set.seed(666)
+
+simResiduals <- simulateResiduals(fittedModel = full_mod, n = 5000)
+
+plotSimulatedResiduals(simulationOutput = simResiduals)
+
+```
+
+Test VIF
+
+```{r}
+
+vif(glm(lgl_Settle ~ Year_group + log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + Grid_area2 + rel_fledge_est3yr + rel_density3yr, family = "binomial", data = SETTLE_poisson))
+
+```
+
+No real issues.
+
+---------------------------
+
+Test residual of random effects
+
+```{r}
+
+qqnorm(ranef(full_mod)[[1]])
+qqline(ranef(full_mod)[[1]])
+
+```
+
+Sub area is fine.
+
+-----------------------
+
+To compare our different hypothesese (i.e. different cues) we will use AIC model selection.
+
+Model selection:
+
+```{r}
+
+#Fit models with every possible combination of cues (using both spamm and lme4 for R2 values)
+all_models <- expand.grid(elev = c("", "+ Year_group : log(Median3)"),
+                          density = c("", "+ rel_density3yr"),
+                          food = c("", "+ log(Coast_Dist2) + log(Gully_Dist2)"),
+                          fledge = c("", "+ rel_fledge_est3yr")) %>% 
+  as_tibble() %>% 
+  mutate(mod_formula = glue::glue("lgl_Settle ~ Year_group + log(Median3) + Grid_area2 + (1|Sub_Area) {cues}",
+                                             cues = paste0(elev, density, food, fledge))) %>% 
+  rowwise() %>% 
+  mutate(models_spamm = list(fitme(as.formula(mod_formula), data = SETTLE_poisson, family = binomial(logit), method = "PQL/L")),
+         models_lme4 = list(glmer(as.formula(mod_formula), data = SETTLE_poisson, family = binomial(logit))))
+
+#This null model with lme4 is needed to improve fitting for R2
+#Otherwise, the null model is re-estimated every time.
+null_model <- glmer(lgl_Settle ~ 1 + (1|Sub_Area),
+                    data = SETTLE_poisson, family = binomial(logit))
+
+#Determine AIC values for every model.
+(selection_table <- all_models %>% 
+  mutate(cAIC = as.numeric(AIC(models_spamm, verbose = FALSE)[2]),
+         R2s = list(MuMIn::r.squaredGLMM(models_lme4, null = null_model)),
+         R2m = R2s[1, "R2m"],
+         R2c = R2s[1, "R2c"],
+         elev = if(elev != "") "+" else "",
+         food = if(food != "") "+" else "",
+         fledge = if(fledge != "") "+" else "",
+         density = if(density != "") "+" else "") %>%
+  ungroup() %>% 
+  arrange(cAIC) %>% 
+  mutate(deltaAIC = cAIC - min(cAIC),
+         relative_loglik = exp(-0.5*deltaAIC),
+         AIC_weight = relative_loglik/sum(relative_loglik),
+         Conf_set = cumsum(AIC_weight)) %>% 
+  select(elev:fledge, cAIC, deltaAIC:Conf_set, R2m, R2c, models_spamm, models_lme4, -mod_formula, -relative_loglik, -R2s))
+
+```
+
+We're cheating a bit here by fitting with a different model package to estimate R2. However, the coefficient estimates and AIC values are essentially identical between models.
+
+We need to compare marginal AIC because conditional AIC is only available with spaMM
+
+```{r}
+
+selection_table %>% 
+  rowwise() %>% 
+  mutate(AIC_spamm = as.numeric(AIC(models_spamm, verbose = FALSE)[1]),
+         AIC_lme4 = as.numeric(AIC(models_lme4)),
+         diff = abs(AIC_spamm - AIC_lme4)) %>% 
+  pull(diff) %>% 
+  range
+
+```
+
+Difference in AIC estimation is >=0.02 units. So we can feel pretty confident that we're achieving very similar fits with the two modelling approaches.
+
+Print selection table with kable
+
+```{r}
+
+library(kableExtra)
+
+selection_table %>% 
+  select(elev:R2c) %>%
+  rename(Elevation = elev,
+         Food = food,
+         Fledglings = fledge,
+         Density = density,
+         `Cumulative weight` = Conf_set,
+         wi = AIC_weight) %>% 
+  mutate_at(vars(cAIC, deltaAIC, R2m, R2c), ~format(round(., digits = 2))) %>%
+  rowwise() %>% 
+  mutate_at(vars(wi), ~if(. < 0.01) "<0.01" else format(round(., digits = 2))) %>%
+  mutate_at(vars(`Cumulative weight`), ~if(. > 0.9949) ">0.99" else format(round(., digits = 2))) %>%
+  ungroup() %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = "bordered")
+
+```
+
+-----------------------
+
+Plot effect of conspecific density
+
+```{r, fig.width = 7, fig.height = 5}
+
+plot_dat <- expand.grid(Year_group = mean(SETTLE_poisson$Median3),
+                        Median3 = mean(SETTLE_poisson$Median3),
+                        Coast_Dist2 = mean(SETTLE_poisson$Coast_Dist2),
+                        Gully_Dist2 = mean(SETTLE_poisson$Gully_Dist2),
+                        rel_density3yr = seq(min(SETTLE_poisson$rel_density3yr),
+                                          max(SETTLE_poisson$rel_density3yr),
+                                          length.out = 1000),
+                        rel_fledge_est3yr = mean(SETTLE_poisson$rel_fledge_est3yr),
+                        Grid_area2 = mean(SETTLE_poisson$Grid_area2))
+
+predictions <- predict(selection_table$models_spamm[[1]], newdata = plot_dat, re.form = NA,
+                       intervals = "predVar")
+
+plot_dat <- plot_dat %>% 
+  mutate(pred = as.numeric(predictions[, 1]),
+         lower = as.numeric(attr(predictions, "intervals")[, 1]),
+         upper = as.numeric(attr(predictions, "intervals")[, 2]))
+
+bin_dat <- SETTLE_poisson %>%
+  ungroup() %>% 
+  mutate(Density_class = cut(.$rel_density3yr, breaks = c(seq(min(SETTLE_poisson$rel_density3yr), max(SETTLE_poisson$rel_density3yr), length.out = 20)), right = FALSE, include.lowest = TRUE)) %>% 
+  group_by(Density_class) %>% 
+  summarise(mean_settle = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[4]),
+            lower = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[5]),
+            upper = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[6]),
+            n = n()) %>% 
+  filter(!is.na(mean_settle)) %>%
+  mutate(Density_numeric = pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
+                                  .f = function(Density_class){
+                                    
+                                    return(mean(as.numeric(strsplit(split = ",", x = gsub("\\(|\\]|\\[|\\)", "", Density_class))[[1]])))
+                                    
+                                  }))
+  
+
+(density <- ggplot()+
+  geom_ribbon(data = plot_dat, aes(x = rel_density3yr, ymin = lower, ymax = upper), fill = "dark grey", colour = NA, alpha = 0.25)+
+  geom_path(data = plot_dat, aes(x = rel_density3yr, y = pred), lty = 2, size = 1)+
+  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.1, size = 0.75)+
+  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 3, shape = 21, fill = "white", stroke = 1)+
+  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 3, family = "sans")+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans"))+
+  xlab("Relative conspecific density/0.25 ha grid")+
+  ylab("Probability of settlement"))
+
+```
+
+Plot effect of conspecific density
+
+```{r, fig.width = 7, fig.height = 5}
+
+plot_dat <- expand.grid(Year_group = mean(SETTLE_poisson$Median3),
+                        Median3 = mean(SETTLE_poisson$Median3),
+                        Coast_Dist2 = mean(SETTLE_poisson$Coast_Dist2),
+                        Gully_Dist2 = mean(SETTLE_poisson$Gully_Dist2),
+                        rel_fledge_est3yr = seq(min(SETTLE_poisson$rel_fledge_est3yr),
+                                          max(SETTLE_poisson$rel_fledge_est3yr),
+                                          length.out = 1000),
+                        rel_density3yr = mean(SETTLE_poisson$rel_density3yr),
+                        Grid_area2 = mean(SETTLE_poisson$Grid_area2))
+
+predictions <- predict(selection_table$models_spamm[[1]], newdata = plot_dat, re.form = NA,
+                       intervals = "predVar")
+
+plot_dat <- plot_dat %>% 
+  mutate(pred = as.numeric(predictions[, 1]),
+         lower = as.numeric(attr(predictions, "intervals")[, 1]),
+         upper = as.numeric(attr(predictions, "intervals")[, 2]))
+
+bin_dat <- SETTLE_poisson %>%
+  ungroup() %>% 
+  mutate(Density_class = cut(.$rel_fledge_est3yr, breaks = c(seq(min(SETTLE_poisson$rel_fledge_est3yr), 1, length.out = 20), 1.2, 1.4, 1.6), right = FALSE, include.lowest = TRUE)) %>% 
+  group_by(Density_class) %>% 
+  summarise(mean_settle = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[4]),
+            lower = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[5]),
+            upper = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[6]),
+            n = n()) %>% 
+  filter(!is.na(mean_settle)) %>%
+  mutate(Density_numeric = pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
+                                  .f = function(Density_class){
+                                    
+                                    return(mean(as.numeric(strsplit(split = ",", x = gsub("\\(|\\]|\\[|\\)", "", Density_class))[[1]])))
+                                    
+                                  }))
+  
+
+(fledge <- ggplot()+
+  geom_ribbon(data = plot_dat, aes(x = rel_fledge_est3yr, ymin = lower, ymax = upper), fill = "dark grey", colour = NA, alpha = 0.25)+
+  geom_path(data = plot_dat, aes(x = rel_fledge_est3yr, y = pred), lty = 2, size = 1)+
+  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.035, size = 0.75)+
+  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 3, shape = 21, fill = "white", stroke = 1)+
+  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 3, family = "sans")+
+  scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1))+
+  theme_ubuntu()+
+  theme(text = element_text(family = "sans"))+
+  xlab("Relative conspecific fledgling output/0.25 ha grid")+
+  ylab("Probability of settlement"))
+
+```
+
+```{r, fig.width = 14, fig.height = 5}
+
+cowplot::plot_grid(density, fledge, nrow = 1, labels = c("a)", "b)"))
+
+```
+
+```{r}
+
+#Save as pdf
+ggsave("../plots/Figure_4.pdf", width = 34, height = 15, units = "cm", dpi = 600)
+
+```
+
+```{r}
+
+library(kableExtra)
+
+CIs <- as.data.frame(cbind(confint(selection_table$models_lme4[[1]], method = "Wald")[-1, ],
+             confint(selection_table$models_lme4[[1]], level = 0.995, method = "Wald")[-1, ])) %>%
+  rowwise() %>% 
+  mutate(CI95 = paste(format(`2.5 %`, digits = 2, scientific = -2, nsmall = 2), format(`97.5 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/"),
+         CI995 = paste(format(`0.25 %`, digits = 2, scientific = -2, nsmall = 2), format(`99.75 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/")) %>% 
+  ungroup() %>%
+  mutate(Estimate = format(round((fixef(selection_table$models_lme4[[1]])), digits = 2), nsmall = 2),
+         Variable = names(fixef(selection_table$models_lme4[[1]]))) %>% 
+  select(Variable, Estimate, CI95, CI995)
+
+(CI_25ha <- CIs %>% 
+  select(Variable, Estimate, CI95, CI995) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = "bordered"))
+
+```
+
+
+----------------------------------
+
+##100x100
+
+Load the settlement data
+
+```{r}
+
+data("SETTLE_poisson_100")
+
+```
+
+Now we know that settlement patterns have changed over time (i.e. elevation doesn't affect settlement in the same way in later years).
+
+Next, we want to consider what cues might be used to inform settlement behaviour.
+
+We consider:
+
+- Median elevation of the area and coastal distance (i.e. elevation cues)
+- Territory density in the year BEFORE settlement (i.e. conspecific attraction)
+- Fledgling production in the year BEFORE settlement (i.e. reproductive information)
+
+```{r}
+
+SETTLE_poisson_100$Median3 <- transform(x = SETTLE_poisson_100$Median2, type = "standard.log")
+SETTLE_poisson_100$Gully_Dist2 <- transform(x = SETTLE_poisson_100$Gully_Dist, type = "standard.log")
+SETTLE_poisson_100$Coast_Dist2  <- transform(x = SETTLE_poisson_100$Coast_Dist, type = "standard.log")
+SETTLE_poisson_100$Grid_area2   <- transform(x = SETTLE_poisson_100$Grid_area, type = "standard")
+SETTLE_poisson_100$Year_group <- SETTLE_poisson_100$Year - min(SETTLE_poisson_100$Year)
+
+```
+
+```{r}
+
+SETTLE_poisson_100 <- filter(SETTLE_poisson_100, !is.na(rel_density3yr))
+
+```
+
+```{r}
+
+library(spaMM)
+full_mod_100 <- fitme(lgl_Settle ~ Year_group * log(Median3) + rel_fledge_est3yr + rel_density3yr + Grid_area2 + (1|Sub_Area),
+                  data = SETTLE_poisson_100, family = binomial(logit), method = "PQL/L")
+
+```
+
+Assess linearity of relationships
+
+```{r, fig.width = 7, fig.height = 5}
+
+SETTLE_poisson_100 %>%
+  ungroup() %>%
+  mutate(logits = c(predict(full_mod_100)), Median2 = log(Median3)) %>%
+  select(logits, Year, Median2, rel_fledge_est3yr, rel_density3yr) %>%
+  tidyr::gather(key = "Predictor", value = "Pred_value", -logits) %>%
+  ggplot()+
+  geom_point(aes(x = Pred_value, y = logits))+
+  facet_wrap(facets = ~Predictor, scales = "free_x")
+
+```
+
+```{r}
+
+summary(full_mod_100)
+
+```
+
+Test residuals using DHARMa package
+
+```{r, message = FALSE, fig.width = 7, fig.height = 5}
+
+set.seed(666)
+
+simResiduals <- simulateResiduals(fittedModel = full_mod_100, n = 5000)
+
+plotSimulatedResiduals(simulationOutput = simResiduals)
+
+```
+
+Test VIF
+
+```{r}
+
+vif(glm(lgl_Settle ~ Year_group + log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + rel_fledge_est3yr + Grid_area2 + rel_density3yr, family = "binomial", data = SETTLE_poisson_100))
+
+```
+
+No real issues.
+
+---------------------------
+
+Test residual of random effects
+
+```{r}
+
+qqnorm(ranef(full_mod_100)[[1]])
+qqline(ranef(full_mod_100)[[1]])
+
+```
+
+Sub area is fine.
+
+-----------------------
+
+Plot effect of conspecific density
+
+```{r, fig.width = 7, fig.height = 5}
+
+plot_dat <- expand.grid(Year_group = mean(SETTLE_poisson_100$Year_group),
+                        Median3 = mean(SETTLE_poisson_100$Median3),
+                        Coast_Dist2 = mean(SETTLE_poisson_100$Coast_Dist2),
+                        Gully_Dist2 = mean(SETTLE_poisson_100$Gully_Dist2),
+                        rel_density3yr = seq(min(SETTLE_poisson_100$rel_density3yr, na.rm = T),
+                                          max(SETTLE_poisson_100$rel_density3yr, na.rm = T),
+                                          length.out = 1000),
+                        rel_fledge_est3yr = mean(SETTLE_poisson_100$rel_fledge_est3yr, na.rm = T),
+                        Grid_area2 = mean(SETTLE_poisson_100$Grid_area2))
+
+predictions <- predict(full_mod_100, newdata = plot_dat, re.form = NA,
+                       intervals = "predVar")
+
+plot_dat <- plot_dat %>% 
+  mutate(pred = as.numeric(predictions[, 1]),
+         lower = as.numeric(attr(predictions, "intervals")[, 1]),
+         upper = as.numeric(attr(predictions, "intervals")[, 2]))
+
+bin_dat <- SETTLE_poisson_100 %>%
+  ungroup() %>% 
+  mutate(Density_class = cut(.$rel_density3yr, breaks = c(seq(min(SETTLE_poisson_100$rel_density3yr, na.rm = T), max(SETTLE_poisson_100$rel_density3yr, na.rm = T), length.out = 20)), right = FALSE, include.lowest = TRUE)) %>% 
+  group_by(Density_class) %>% 
+  summarise(mean_settle = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[4]),
+            lower = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[5]),
+            upper = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[6]),
+            n = n()) %>% 
+  filter(!is.na(mean_settle)) %>% 
+  mutate(Density_numeric = pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
+                                  .f = function(Density_class){
+                                    
+                                    return(mean(as.numeric(strsplit(split = ",", x = gsub("\\(|\\]|\\[|\\)", "", Density_class))[[1]])))
+                                    
+                                  }))
+  
+
+ggplot()+
+  geom_ribbon(data = plot_dat, aes(x = rel_density3yr, ymin = lower, ymax = upper), fill = "dark grey", colour = NA, alpha = 0.25)+
+  geom_path(data = plot_dat, aes(x = rel_density3yr, y = pred), lty = 2, size = 1)+
+  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.1, size = 1)+
+  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 3, shape = 21, fill = "white", stroke = 1)+
+  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 3, family = "Ubuntu")+
+  theme_ubuntu()+
+  xlab("Relative territory density/ha grid")+
+  ylab("Probability of settlement")
+
+```
+
+```{r}
+
+library(kableExtra)
+
+CI_mod <- glmer(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + rel_density3yr + rel_fledge_est3yr + (1|Sub_Area),
+                  data = SETTLE_poisson_100, family = binomial(logit))
+
+CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
+             confint(CI_mod, level = 0.995, method = "Wald")[-1, ])) %>%
+  rowwise() %>% 
+  mutate(CI95 = paste(format(`2.5 %`, digits = 2, scientific = -2, nsmall = 2), format(`97.5 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/"),
+         CI995 = paste(format(`0.25 %`, digits = 2, scientific = -2, nsmall = 2), format(`99.75 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/")) %>% 
+  ungroup() %>%
+  mutate(Estimate = format(round((fixef(CI_mod)), digits = 2), nsmall = 2),
+         Variable = names(fixef(CI_mod))) %>% 
+  select(Variable, Estimate, CI95, CI995)
+
+(CI_100ha <- CIs %>% 
+  select(Variable, Estimate, CI95, CI995) %>% 
+    kable() %>% 
+  kable_styling(bootstrap_options = "bordered"))
+
+```
+
+Determine R2 values for reviewers. To do this we need to use our lme4 model.
+
+Add this to our CI estimates.
+
+```{r}
+
+(R2 <- MuMIn::r.squaredGLMM(CI_mod))
+
+```

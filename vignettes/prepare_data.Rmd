@@ -1,0 +1,1625 @@
+---
+title: "Prepare data"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{data_prep}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+We want to look at the probability of new recruits to settle in a given section of the saltmarsh.
+
+We cannot monitor the behaviour of individual birds because birds that do not settle are not monitored. Instead, we can look at the total number of a settlements in any given area.
+
+To do this, we need to create a grid that covers the whole study area.
+
+We create this grid in QGIS and then proceed.
+
+###Load packages
+
+```{r, echo = FALSE, message = FALSE}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+
+#Load libraries
+library(raster)
+library(rgdal)
+library(deldir)
+library(rgeos)
+library(lme4)
+library(ggplot2)
+library(extrafont)
+library(plotly)
+library(webshot)
+library(RSelenium)
+library(DHARMa)
+library(arm)
+library(boot)
+library(dplyr)
+library(purrr)
+library(car)
+library(spaMM)
+library(glmmTMB)
+library(foreach)
+library(MyFuncs)
+
+```
+
+###Load the data 50 x 50
+
+Here we use a 50x50m grid. (We will rerun this with a 100x100m grid as well to confirm the strength of our results.)
+
+```{r}
+
+data("Territories")
+
+#Extract territory polygon data and order by maleID
+#We cannot truly determine the behaviour of an unbanded bird from one year to the next (i.e. we don't know if it's a new unbanded bird or the same one!), so we removed all records from unbanded birds (any unbanded bird was included as an NA).
+TERR <- Territories@data %>%
+  arrange(MaleID) %>%
+  filter(!is.na(MaleCode)) %>%
+  mutate(Year = as.numeric(Year))
+
+#Load the csv that specifies which areas were the 'main' study areas in each year
+data("AREA")
+
+#Load the 50 x 50m grid
+data("GRID")
+
+#Load gully data (for making plots)
+data("GULLY")
+
+```
+
+Check size of grids
+
+```{r}
+
+if(gArea(GRID, byid = T)[1] != 2500){
+  
+  stop("Using the wrong grid! It should be 50m x 50m")
+  
+}
+
+```
+
+------------
+
+There are also some territories where no median could be calculated (i.e. territories too small to have different elevations). These are removed from our analysis.
+
+```{r}
+
+TERR2 <- subset(TERR, !is.na(Median))
+
+#Make median elevation in cm above MHT from 1971 (see last paper)
+#1971 is the first year we have water level data
+TERR2$Median2 <- TERR2$Median - 90
+
+nrow(TERR) - nrow(TERR2)
+
+```
+
+We only lose 8 data points from this subset.
+
+---------------
+
+For each year we want to determine which individuals entered the population. We need to account for the fact that individuals will 'appear' in the population as the study area is expanded.
+
+- Remove individuals in 1984, we don't have any data from earlier years so we don't know when they settled.
+- Remove individuals that were already in an area when we expanded the study. We don't know when they settled.
+
+```{r}
+
+SETTLE2 <- TERR2 %>%
+  group_by(MaleID) %>%
+  arrange(Year) %>% 
+  #Take the first record for every male
+  slice(1) %>%
+  #Go through each record...
+  left_join(pmap_df(.l = list(MaleID = .$MaleID,
+                              Year = .$Year,
+                              Sub_area = .$Sub_Area),
+                    .f = function(MaleID, Year, Sub_area, used_areas){
+                      
+                      #If the record is from 1984...
+                      if(Year == 1984){
+                        
+                        #We can't determine settlement because we don't know if they were there the year before.
+                        return(tibble(MaleID = MaleID, Settled = FALSE, Note = "1984"))
+                        
+                        #If the sub area of the male was surveyed in the current and previous year...
+                        } else if(all(used_areas[used_areas$Year == (Year - 1) | used_areas$Year == Year, Sub_area])){
+                          
+                          #Then we can assess settlement...
+                          return(tibble(MaleID = MaleID, Settled = TRUE, Note = "None"))
+                          
+                        #Otherwise...
+                        } else {
+                          
+                          #We can't assess settlement because it was outside the main study area.
+                          return(tibble(MaleID = MaleID, Settled = FALSE, Note = "Outside_Area"))
+                          
+                        }
+                      
+                      }, used_areas = AREA), by = "MaleID") %>%
+  #Remove all individuals where we couldn't assess settlement
+  filter(Settled)
+
+#Standardise year to 0
+SETTLE2$Year1 <- SETTLE2$Year - min(SETTLE2$Year)
+
+```
+
+--------
+
+We can assess the data:
+
+```{r}
+
+nrow(SETTLE2)
+
+```
+
+We have information on 266 males that settled during the study period.
+
+--------
+
+We can now make this data into a shapefile...
+
+```{r}
+
+#Use projection Amersfoort RD new (standard projection for Dutch coordinates)
+SETTLE_SHP <- SpatialPointsDataFrame(coords = SETTLE2[, c("X", "Y")],
+                                     data = SETTLE2, proj4string = CRS("+proj=sterea +lat_0=52.15616055555555 +lon_0=5.38763888888889 +k=0.9999079 +x_0=155000 +y_0=463000 +ellps=bessel +units=m +no_defs"))
+
+```
+
+Now we can go through each year and determine settlement. Where multiple settlements occur, we replicate the grid record.
+
+**N.B.** It is important that we only include those grid squares that were monitored both in the year of the settlement AND the year before. Otherwise grid squares outside the study area might look like they are rarely settled simply because they are not surveyed.
+
+```{r}
+
+sett.list <- list()
+
+NUM <- 1
+
+for(i in 1985:2016){
+  
+  #Make a subset of first settlements by all individual in the current year
+  SETTLE_SUB <- subset(SETTLE_SHP, Year == i)
+  
+  #Determine the overlap with the grid
+  SETTLED <- data.frame(over(SETTLE_SUB, GRID))
+  
+  #These are all cases where a settlement occurred
+  SETTLED$Settle <- 1
+  
+  #Order them by the ID of the polygon
+  SETTLED <- SETTLED[order(SETTLED$POLY_ID), ]
+  
+  #Subset all those areas that were surveyed in both the current and previous year
+  AREA_SUB <- subset(AREA, Year == i | Year == (i - 1))
+  AREA_SUB <- AREA_SUB[, colSums(AREA_SUB) >= 2]
+  
+  #Subset out all grid cells that fall within these years
+  GRID_SUB <- GRID@data[GRID@data$Sub_Area %in% colnames(AREA_SUB)[-1], ]
+  
+  #Subset out all grid cells that contained no settlement
+  GRID_SUB2 <- GRID_SUB[(GRID_SUB$POLY_ID %in% SETTLED$POLY_ID) == FALSE, ]
+  GRID_SUB2$Settle <- 0
+  
+  FULL <- plyr::rbind.fill(SETTLED, GRID_SUB2)
+  FULL <- FULL[order(FULL$POLY_ID), ]
+  
+  FULL$Year <- i
+  
+  sett.list[[NUM]] <- FULL
+  
+  NUM <- NUM + 1
+  
+}
+
+SETTLE3 <- plyr::rbind.fill(sett.list) %>% 
+  mutate(POLY_ID = as.character(POLY_ID))
+
+```
+
+Did we include all settlements?
+
+```{r}
+
+nrow(SETTLE2) == sum(SETTLE3$Settle)
+
+```
+
+------------------
+
+1. Determine conspecific density in the previous year.
+
+Different grid squares will have different territory densities (e.g. resident v. leapfrog). We want to determine the territory density of each grid square in the previous season(s) and include this as part of our analysis.
+
+```{r}
+
+#Load centroids of territories.
+data("TERR_PTS")
+
+```
+
+We now want to determine the number of territory centroids in each grid square in each year.
+
+```{r}
+
+terr.list <- list()
+
+NUM <- 1
+
+for(i in 1984:2016){
+  
+  #Subset to only include territory centroids from that year
+  TERR_SUB <- subset(TERR_PTS, Year == i)
+  
+  #Subset all those areas that were surveyed in the current year
+  AREA_SUB <- subset(AREA, Year == i)
+  AREA_SUB <- AREA_SUB[ , colSums(AREA_SUB) > 0]
+  
+  #Subset out all grid cells that fall within these years
+  GRID_SUB <- subset(GRID, (Sub_Area %in% colnames(AREA_SUB)[-1]) == TRUE)
+  
+  #Determine territory density per grid cell
+  OVERLAP <- over(TERR_SUB, GRID_SUB)
+  DENSITY <- data.frame(table(OVERLAP$POLY_ID)) 
+  colnames(DENSITY) <- c("ID", "DENSITY")
+  
+  #We want to include all grid squares that contained no territories during the year (but were still surveyed)
+  FULL_DENSITY <- data.frame(ID = as.character(GRID_SUB@data$POLY_ID), DENSITY = 0, Year = i)
+  
+  for(j in 1:nrow(FULL_DENSITY)){
+    
+    if(any(DENSITY$ID %in% FULL_DENSITY$ID[j]) == TRUE){
+      
+      FULL_DENSITY$DENSITY[j] <- DENSITY$DENSITY[DENSITY$ID %in% FULL_DENSITY$ID[j]]
+      
+    }
+    
+  }
+  
+  terr.list[[NUM]] <- FULL_DENSITY
+  
+  NUM <- NUM + 1
+  
+}
+
+GRID_DENSITY <- plyr::rbind.fill(terr.list) %>% mutate(ID = as.character(ID)) %>% 
+  arrange(Year, ID)
+
+```
+
+This raw density info is saved and used later
+
+```{r, eval = FALSE}
+
+usethis::use_data(GRID_DENSITY, overwrite = TRUE)
+
+```
+
+Write a function to extract density
+
+```{r}
+
+#Create function to determine density in the past X years
+multiyr_density <- function(yr_range, grid_data){
+  
+  output <- pmap_df(.l = list(Settle_year = (min(grid_data$Year) + yr_range):max(grid_data$Year)),
+                             .f = function(Settle_year, grid_data){
+                               
+                               #Subset out all grid squares from the previous X years
+                               SUB <- filter(grid_data, Year %in% (Settle_year - yr_range):(Settle_year - 1)) %>% 
+                                 #Group by grid square
+                                 group_by(ID) %>% 
+                                 #Take the mean density and number of records (to determine if it was in both years)
+                                 summarise(mean_3yr_density = mean(DENSITY),
+                                           total_yrs = n()) %>% 
+                                 #Include information on the year that it will be linked to
+                                 mutate(Year = Settle_year) %>% 
+                                 #Remove any cases where the grid was not sampled in all years
+                                 filter(total_yrs == yr_range) %>% 
+                                 arrange(Year, ID)
+                               
+                               return(SUB)
+                               
+                             }, grid_data = GRID_DENSITY)
+  
+  print(output %>% 
+    group_by(Year) %>% 
+    summarise(mean_density = mean(mean_3yr_density),
+              SE = sd(mean_3yr_density)/sqrt(n()),
+              lower = mean_density - SE,
+              upper = mean_density + SE) %>% 
+    {
+      ggplot(.)+
+        geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+        geom_point(aes(x = Year, y = mean_density), shape = 21, fill = "dark grey", size = 3)+
+        theme_classic()
+    })
+  
+  return(output)
+  
+}
+
+```
+
+```{r}
+
+#Determine the density for the past 3 years
+GRID_DENSITY3yr <- multiyr_density(3, GRID_DENSITY)
+
+SETTLE3 <- SETTLE3 %>% 
+  #Join in data just from the previous year
+  left_join(GRID_DENSITY %>% rename(POLY_ID = ID) %>% mutate(Year = Year + 1), by = c("POLY_ID", "Year")) %>% 
+  #Join in data over the past 3 years
+  left_join(GRID_DENSITY3yr %>% dplyr::select(ID, mean_3yr_density, Year) %>% rename(POLY_ID = ID),
+            by = c("POLY_ID", "Year"))
+
+```
+
+There are some NA records in the data (i.e. records where the territory centroid fell in an area that wasn't surveyed previously and so has no density info).
+
+```{r}
+
+sum(subset(SETTLE3, is.na(DENSITY) == FALSE)$Settle)
+
+```
+
+We lost 7 settlement events in this way, leaving us with a total of 259 settlement events for analysis. Remove these from analysis.
+
+```{r}
+
+SETTLE4 <- subset(SETTLE3, is.na(DENSITY) == FALSE)
+
+#Centre median elevation to be in the same units as other elevation measurements (cm above 1971.
+SETTLE4$Median2 <- SETTLE4$Median - 90
+
+```
+
+Finally, we will determine RELATIVE density in each year
+
+```{r}
+
+SETTLE4 <- SETTLE4 %>% 
+  group_by(Year) %>% 
+  mutate(rel_density = DENSITY - mean(DENSITY),
+         rel_density3yr = mean_3yr_density - mean(mean_3yr_density, na.rm = T))
+
+```
+
+2. Extract reproductive output in the previous year
+
+From our database, we have three measures of reproductive output.
+
+a) Chick info (1986 - 2006): Information on whether each individual chick fledged or not.
+
+b) Nest info (1996 - 2013): Information on individual nests, with a recorded value for the total number of fledglings.
+
+c) Nest check info (2003 - present): Observations made every time a nest was checked, including presence and age of chicks.
+
+```{r}
+
+data("FLEDGE_DATA")
+
+```
+
+We preference data from nest info, then nest checks, and finally chick info.
+
+Chick info has 'fate' data, but it's subjective which of these should count as fledged (we have to make assumptions).
+
+Nest info applies standard previous used decision rules and should be most accurate. 
+
+For nest checks we need to sift through all nest checks to find cases where a fledging was recorded.
+
+We create a combined measure of number of fledglings that uses the best data available.
+
+```{r}
+
+FLEDGE_DATA$Fledge_combo <- ifelse(!is.na(FLEDGE_DATA$Fledge_NestInfo), FLEDGE_DATA$Fledge_NestInfo, ifelse(!is.na(FLEDGE_DATA$Fledge_NestCheck), FLEDGE_DATA$Fledge_NestCheck, FLEDGE_DATA$Fledge_ChickInfo))
+
+```
+
+There are some records that have nest info but there is no written fledging data. We assumed that these nests produced no fledglings (i.e. if the nest was being monitored we would know if there were some fledglings).
+
+```{r}
+
+FLEDGE_DATA$Fledge_combo <- ifelse(is.na(FLEDGE_DATA$Fledge_combo) & !is.na(FLEDGE_DATA$NestID), 0, FLEDGE_DATA$Fledge_combo)
+
+```
+
+There are some individuals who have no nestID, and also no fledging data. These are kept as NAs, but below we will create a new column and estimate their output for our public information analysis.
+
+Check that data looks reasonable.
+
+```{r}
+
+FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_combo, na.rm = T),
+            SE = sd(Fledge_combo, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))}
+
+```
+
+Now that we know how many individuals fledged in a given territory, we want to calculate an absolute value and a value relative fledgling value in each grid square each year.
+
+We have a number of records with no nest info or fledging info. We need to deal with this to use them to calculate public information. If we make them 0, we will artificially deflate fledging estimates at a site. If we make them NA, this will artifically inflate fledging estimates. This is a problem, as the occurence of these no nest/no fledging records is not evenly spread throughout the data (e.g. they are more common in early years). Therefore, we instead gave them a value equal to the average fledging output of other birds of their status in the year considered.
+
+How many NAs are there? How many per year?
+
+```{r}
+
+(sum(is.na(FLEDGE_DATA$Fledge_combo))/nrow(FLEDGE_DATA))*100
+
+```
+
+~19% of nests have no fledgling data
+
+```{r}
+
+FLEDGE_DATA %>% 
+  group_by(Year) %>%
+  summarise(Total_NA = sum(is.na(Fledge_combo)),
+            Perc_NA = Total_NA/n()) %>% 
+  {ggplot(.)+
+      geom_col(aes(x = Year, y = Perc_NA))+
+      theme_ubuntu()}
+
+```
+
+Some years have up to 50% of nests without fledgling data!
+
+One way to overcome this is to give these empty ones the fledgling value that was most likely in that year.
+
+```{r}
+
+multinom_dat <- FLEDGE_DATA %>% 
+  filter(!is.na(Fledge_combo)) %>% 
+  group_by(Year, Fledge_combo) %>% 
+  summarise(n = n()) %>% 
+  mutate(prop = n/sum(n))
+
+FLEDGE_DATA <- FLEDGE_DATA %>% 
+  mutate(Fledge_est = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+                               .f = function(nr_fledge, current_yr, multinom_dat){
+                                 
+                                 if(is.na(nr_fledge)){
+                                   
+                                   sub_multinom <- filter(multinom_dat, Year == current_yr)
+                                   
+                                   return(sub_multinom[which(sub_multinom$prop == max(sub_multinom$prop)), ]$Fledge_combo)
+                                   
+                                 } else {
+                                   
+                                   return(nr_fledge)
+                                   
+                                 }
+                                 
+                               }, multinom_dat = multinom_dat))
+
+```
+
+Another way we could overcome this could be to fill them with a multinomial distribution (0, 1, 2, 3) based on the proportion of fledgling production in each year.
+
+```{r}
+
+FLEDGE_DATA <- FLEDGE_DATA %>% 
+  mutate(Fledge_est_stochastic = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+                               .f = function(nr_fledge, current_yr, multinom_dat){
+                                 
+                                 if(is.na(nr_fledge)){
+                                   
+                                   sub_multinom <- filter(multinom_dat, Year == current_yr)
+                                   
+                                   return(seq(0, nrow(sub_multinom) - 1, 1)[which(rmultinom(1, 1, prob = sub_multinom$prop) == 1)])
+                                   
+                                 } else {
+                                   
+                                   return(nr_fledge)
+                                   
+                                 }
+                                 
+                               }, multinom_dat = multinom_dat))
+
+```
+
+Finally, we could just assume that any NA is a 0.
+
+```{r}
+
+FLEDGE_DATA <- FLEDGE_DATA %>% 
+  mutate(Fledge_est_consv = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+                               .f = function(nr_fledge, current_yr, multinom_dat){
+                                 
+                                 if(is.na(nr_fledge)){
+                                   
+                                   return(0)
+                                   
+                                 } else {
+                                   
+                                   return(nr_fledge)
+                                   
+                                 }
+                                 
+                               }, multinom_dat = multinom_dat))
+
+```
+
+```{r}
+
+old <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_combo, na.rm = T),
+            SE = sd(Fledge_combo, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("No estimation")}
+
+consv <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_est_consv, na.rm = T),
+            SE = sd(Fledge_est_consv, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("Consv estimation")}
+
+new <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_est, na.rm = T),
+            SE = sd(Fledge_est, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("Most likely nest")}
+
+newest <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_est_stochastic, na.rm = T),
+            SE = sd(Fledge_est_stochastic, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("Multinomial")}
+
+cowplot::plot_grid(old, consv, new, newest, nrow = 2, ncol = 2)
+
+```
+
+There are two years where there is no recorded reproductive success (2002 & 2007). I checked back on the records and this seems to be correct (i.e. there were no fledglings in these years).
+
+If we use the multi-nomial approach we would need to rerun our analysis multiple times to account for stochasticity.
+
+Overlay with grid ID and save the data for use in plotting
+
+```{r, eval = FALSE}
+
+Raw_fledge_data <- FLEDGE_DATA %>% 
+  mutate(POLY_ID = over(TERR_PTS, GRID)$POLY_ID)
+
+usethis::use_data(Raw_fledge_data, overwrite = T)
+
+```
+
+Finally, we want to determine the average number of fledglings in each grid square in each year. We do this with all our interpolation methods.
+
+```{r}
+
+avg_fledge <- FLEDGE_DATA %>%
+  mutate(POLY_ID = over(TERR_PTS, GRID)$POLY_ID) %>% 
+  group_by(Year, POLY_ID) %>% 
+  summarise(mean_fledge_consv = mean(Fledge_est_consv),
+            mean_fledge_est = mean(Fledge_est),
+            mean_fledge_multinom = mean(Fledge_est_stochastic)) %>% 
+  ungroup()
+
+```
+
+We also want to consider average number of fledglings in each grid square over the past 3 years.
+
+```{r}
+
+#Go through and group data by 3 year blocks.
+avg_fledge_3yr <- pmap_df(.l = list(Settle_year = (min(FLEDGE_DATA$Year) + 3):max(FLEDGE_DATA$Year)),
+                          .f = function(Settle_year, FLEDGE_DATA){
+                            
+                            SUB <- FLEDGE_DATA %>%
+                              mutate(POLY_ID = over(TERR_PTS, GRID)$POLY_ID) %>% 
+                              filter(Year %in% (Settle_year - 3):(Settle_year - 1)) %>% 
+                              group_by(POLY_ID) %>% 
+                              #Take mean of fledge_est and record number of year used
+                              summarise(mean_fledge_est3yr = mean(Fledge_est),
+                                        min_yr = min(Year), max_yr = max(Year),
+                                        diff = max_yr - min_yr) %>% 
+                              #Remove those cases with no grid squares in the whole time period.
+                              filter(diff == 2) %>% 
+                              mutate(Year = Settle_year)
+                            
+                            return(SUB)
+                            
+                          }, FLEDGE_DATA = FLEDGE_DATA)
+
+```
+
+Link this to our settlement data and then determine relative values for each year
+
+```{r}
+
+SETTLE4 <- SETTLE4 %>% 
+  left_join(avg_fledge %>% mutate(Year = Year + 1), by = c("Year", "POLY_ID")) %>%
+  left_join(avg_fledge_3yr %>% dplyr::select(POLY_ID, Year, mean_fledge_est3yr), by = c("Year", "POLY_ID")) %>% 
+  ungroup() %>% 
+  #When there were no territories, we make fledgling numbers 0.
+  mutate(mean_fledge_consv = pmap_dbl(.l = list(mean_fledge_consv = .$mean_fledge_consv),
+                                .f = function(mean_fledge_consv){
+                                  
+                                  ifelse(is.na(mean_fledge_consv), 0, mean_fledge_consv)
+                                  
+                                }),
+         mean_fledge_est = pmap_dbl(.l = list(mean_fledge_est = .$mean_fledge_est),
+                                .f = function(mean_fledge_est){
+                                  
+                                  ifelse(is.na(mean_fledge_est), 0, mean_fledge_est)
+                                  
+                                }),
+         mean_fledge_multinom = pmap_dbl(.l = list(mean_fledge_multinom = .$mean_fledge_multinom),
+                                .f = function(mean_fledge_multinom){
+                                  
+                                  ifelse(is.na(mean_fledge_multinom), 0, mean_fledge_multinom)
+                                  
+                                }),
+         mean_fledge_est3yr = pmap_dbl(.l = list(mean_fledge_est3yr = .$mean_fledge_est3yr,
+                                                 Sub_Area = .$Sub_Area, Current_Year = .$Year),
+                                .f = function(mean_fledge_est3yr, Sub_Area, Current_Year, Area_info){
+                                  
+                                  if(Current_Year >= 1987){
+                                  
+                                  ifelse(!all(filter(Area_info, Year %in% (Current_Year - 3):Current_Year)[, Sub_Area]), NA,
+                                         ifelse(is.na(mean_fledge_est3yr), 0, mean_fledge_est3yr))
+                                    
+                                  } else {
+                                    
+                                    NA
+                                    
+                                  }
+                                  
+                                }, Area_info = .GlobalEnv$AREA)) %>% 
+  group_by(Year) %>% 
+  mutate(rel_fledge_consv = mean_fledge_consv - mean(mean_fledge_consv),
+         rel_fledge_est = mean_fledge_est - mean(mean_fledge_est),
+         rel_fledge_est3yr = mean_fledge_est3yr - mean(mean_fledge_est3yr, na.rm = T),
+         rel_fledge_multinom = mean_fledge_multinom - mean(mean_fledge_multinom))
+
+```
+
+------------------
+
+We now take our settlement data and turn it into count data.
+
+```{r}
+
+SETTLE_poisson <- SETTLE4 %>%
+  group_by(Year, POLY_ID) %>%
+  summarise(nr_Settle = sum(Settle),
+            lgl_Settle = nr_Settle > 0,
+            Median2 = Median2[1],
+            Sub_Area = Sub_Area[1],
+            Gully_Dist = Gully_Dist[1],
+            Coast_Dist = Coast_Dist[1],
+            Grid_area = Grid_area[1],
+            rel_density = rel_density[1],
+            rel_density3yr = rel_density3yr[1],
+            mean_fledge_consv = mean_fledge_consv[1],
+            rel_fledge_consv = rel_fledge_consv[1],
+            mean_fledge_est = mean_fledge_est[1],
+            rel_fledge_est = rel_fledge_est[1],
+            mean_fledge_multinom = mean_fledge_multinom[1],
+            rel_fledge_multinom = rel_fledge_multinom[1],
+            rel_fledge_est3yr = rel_fledge_est3yr[1]) %>%
+  arrange(Year)
+
+#We save this as part of our package because we'll use the same data for our analysis of cues.
+
+```
+
+```{r, eval = FALSE}
+
+usethis::use_data(SETTLE_poisson, overwrite = T)
+
+```
+
+--------------------------------------------------
+
+###Load the data 100 x 100
+
+Here we rerun with a 100x100m grid.
+
+```{r}
+
+data("Territories")
+
+#Extract territory polygon data and order by maleID
+#We cannot truly determine the behaviour of an unbanded bird from one year to the next (i.e. we don't know if it's a new unbanded bird or the same one!), so we removed all records from unbanded birds (any unbanded bird was included as an NA).
+TERR <- Territories@data %>%
+  arrange(MaleID) %>%
+  filter(!is.na(MaleCode)) %>%
+  mutate(Year = as.numeric(Year))
+
+#Load the csv that specifies which areas were the 'main' study areas in each year
+data("AREA")
+
+#Load the 100 x 100m grid
+data("GRID_100")
+
+#Load gully data (for making plots)
+data("GULLY")
+
+```
+
+Check size of grids
+
+```{r}
+
+if(gArea(GRID_100, byid = T)[1] != 10000){
+  
+  stop("Using the wrong grid! It should be 100m x 100m")
+  
+}
+
+```
+
+**N.B.** With the 100 x 100m girds we need to use id instead of POLY_ID as the unique ID for each grid square.
+
+------------
+
+There are some territories where no median could be calculated (i.e. territories too small to have different elevations). These are removed from our analysis.
+
+```{r}
+
+TERR2 <- subset(TERR, !is.na(Median))
+
+#Make median elevation in cm above MHT from 1971 (see last paper)
+#1971 is the first year we have water level data
+TERR2$Median2 <- TERR2$Median - 90
+
+nrow(TERR) - nrow(TERR2)
+
+```
+
+We lose 8 data points from this subset.
+
+---------------
+
+For each year we want to determine which individuals entered the population. We need to account for the fact that individuals will 'appear' in the population as the study area is expanded.
+
+- Remove individuals in 1984, we don't have any data from earlier years so we don't know when they settled.
+- Remove individuals that were in an area when we expanded the study. We don't know when they settled.
+
+```{r}
+
+SETTLE2 <- TERR2 %>%
+  group_by(MaleID) %>%
+  arrange(Year) %>% 
+  #Take the first record for every male
+  slice(1) %>%
+  #Go through each record...
+  left_join(pmap_df(.l = list(MaleID = .$MaleID,
+                              Year = .$Year,
+                              Sub_area = .$Sub_Area),
+                    .f = function(MaleID, Year, Sub_area, used_areas){
+                      
+                      #If the record is from 1984...
+                      if(Year == 1984){
+                        
+                        #We can't determine settlement because we don't know if they were there the year before.
+                        return(tibble(MaleID = MaleID, Settled = FALSE, Note = "1984"))
+                        
+                        #If the sub area of the male was surveyed in the previous year...
+                        } else if(used_areas[used_areas$Year == (Year - 1), Sub_area]){
+                          
+                          #Then we can assess settlement...
+                          return(tibble(MaleID = MaleID, Settled = TRUE, Note = "None"))
+                          
+                        #Otherwise...
+                        } else {
+                          
+                          #We can't assess settlement because it was outside the main study area.
+                          return(tibble(MaleID = MaleID, Settled = FALSE, Note = "Outside_Area"))
+                          
+                        }
+                      
+                      }, used_areas = AREA), by = "MaleID") %>%
+  #Remove all individuals where we couldn't assess settlement
+  filter(Settled)
+
+#Standardise year to 0
+SETTLE2$Year1 <- SETTLE2$Year - min(SETTLE2$Year)
+
+```
+
+--------
+
+We can assess the data:
+
+```{r}
+
+nrow(SETTLE2)
+
+```
+
+We have information on 266 males that settled during the study period.
+
+--------
+
+We can now make this data into a shapefile...
+
+```{r}
+
+SETTLE_SHP <- SpatialPointsDataFrame(coords = SETTLE2[, c("X", "Y")],
+                                     data = SETTLE2, proj4string = CRS("+proj=sterea +lat_0=52.15616055555555 +lon_0=5.38763888888889 +k=0.9999079 +x_0=155000 +y_0=463000 +ellps=bessel +units=m +no_defs"))
+
+```
+
+Now we can go through each year and determine settlement. Where multiple settlements occur, we replicate the grid record.
+
+**N.B.** It is important that we only include those grid squares that were monitored both in the year of the settlement AND the year before. Otherwise grid squares outside the study area might look like they are rarely settled simply because they are not surveyed.
+
+```{r}
+
+sett.list <- list()
+
+NUM <- 1
+
+for(i in 1985:2016){
+  
+  #Make a subset of first settlements by all individual in the current year
+  SETTLE_SUB <- subset(SETTLE_SHP, Year == i)
+  
+  #Determine the overlap with the grid
+  SETTLED <- data.frame(over(SETTLE_SUB, GRID_100))
+  
+  #These are all cases where a settlement occurred
+  SETTLED$Settle <- 1
+  
+  #Order them by the ID of the polygon
+  SETTLED <- SETTLED[order(SETTLED$id), ]
+  
+  #Subset all those areas that were surveyed in both the current and previous year
+  AREA_SUB <- subset(AREA, Year == i | Year == (i - 1))
+  AREA_SUB <- AREA_SUB[, colSums(AREA_SUB) >= 2]
+  
+  #Subset out all grid cells that fall within these years
+  GRID_SUB <- GRID_100@data[GRID_100@data$Sub_Area %in% colnames(AREA_SUB)[-1], ]
+  
+  #Subset out all grid cells that contained no settlement
+  GRID_SUB2 <- GRID_SUB[(GRID_SUB$id %in% SETTLED$id) == FALSE, ]
+  GRID_SUB2$Settle <- 0
+  
+  FULL <- plyr::rbind.fill(SETTLED, GRID_SUB2)
+  FULL <- FULL[order(FULL$id), ]
+  
+  FULL$Year <- i
+  
+  sett.list[[NUM]] <- FULL
+  
+  NUM <- NUM + 1
+  
+}
+
+SETTLE3 <- plyr::rbind.fill(sett.list) %>% 
+  mutate(POLY_ID = as.character(id))
+
+```
+
+Did we include all settlements?
+
+```{r}
+
+nrow(SETTLE2) == sum(SETTLE3$Settle)
+
+```
+
+------------------
+
+1. Determine conspecific density in the previous year.
+
+Different grid squares will have different territory densities (e.g. resident v. leapfrog). This might mean that settlement is more likely closer to the coast simply because there is more chance of a territory vacancy opening up. To account for this, we want to determine the territory density of each grid square in the previous season and include this as part of our analysis.
+
+```{r}
+
+#Load centroids of territories.
+data("TERR_PTS")
+
+```
+
+We now want to determine the number of territory centroids in each grid square in each year.
+
+```{r}
+
+terr.list <- list()
+
+NUM <- 1
+
+for(i in 1984:2016){
+  
+  #Subset to only include territory centroids from that year
+  TERR_SUB <- subset(TERR_PTS, Year == i)
+  
+  #Subset all those areas that were surveyed in the current year
+  AREA_SUB <- subset(AREA, Year == i)
+  AREA_SUB <- AREA_SUB[ , colSums(AREA_SUB) > 0]
+  
+  #Subset out all grid cells that fall within these years
+  GRID_SUB <- subset(GRID_100, (Sub_Area %in% colnames(AREA_SUB)[-1]) == TRUE)
+  
+  #Determine territory density per grid cell
+  OVERLAP <- over(TERR_SUB, GRID_SUB)
+  DENSITY <- data.frame(table(OVERLAP$id)) 
+  colnames(DENSITY) <- c("ID", "DENSITY")
+  
+  #We want to include all grid squares that contained no territories during the year (but were still surveyed)
+  FULL_DENSITY <- data.frame(ID = as.character(GRID_SUB@data$id), DENSITY = 0, Year = i)
+  
+  for(j in 1:nrow(FULL_DENSITY)){
+    
+    if(any(DENSITY$ID %in% FULL_DENSITY$ID[j]) == TRUE){
+      
+      FULL_DENSITY$DENSITY[j] <- DENSITY$DENSITY[DENSITY$ID %in% FULL_DENSITY$ID[j]]
+      
+    }
+    
+  }
+  
+  terr.list[[NUM]] <- FULL_DENSITY
+  
+  NUM <- NUM + 1
+  
+}
+
+GRID_DENSITY <- plyr::rbind.fill(terr.list)
+
+SETTLE3 <- SETTLE3 %>% 
+  left_join(GRID_DENSITY %>% rename(POLY_ID = ID) %>% mutate(Year = Year + 1), by = c("POLY_ID", "Year"))
+
+```
+
+Write a function to extra density
+
+```{r}
+
+#Create function to determine density in the past X years
+multiyr_density <- function(yr_range, grid_data){
+  
+  output <- pmap_df(.l = list(Settle_year = (min(grid_data$Year) + yr_range):max(grid_data$Year)),
+                             .f = function(Settle_year, grid_data){
+                               
+                               #Subset out all grid squares from the previous 2 years
+                               SUB <- filter(grid_data, Year %in% (Settle_year - yr_range):(Settle_year - 1)) %>% 
+                                 #Group by grid square
+                                 group_by(ID) %>% 
+                                 #Take the mean density and number of records (to determine if it was in both years)
+                                 summarise(mean_3yr_density = mean(DENSITY),
+                                           total_yrs = n()) %>% 
+                                 #Include information on the year that it will be linked to
+                                 mutate(Year = Settle_year) %>% 
+                                 #Remove any cases where the grid was not sampled in both years
+                                 filter(total_yrs == yr_range) %>% 
+                                 arrange(Year, ID)
+                               
+                               return(SUB)
+                               
+                             }, grid_data = grid_data)
+  
+  print(output %>% 
+    group_by(Year) %>% 
+    summarise(mean_density = mean(mean_3yr_density),
+              SE = sd(mean_3yr_density)/sqrt(n()),
+              lower = mean_density - SE,
+              upper = mean_density + SE) %>% 
+    {
+      ggplot(.)+
+        geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+        geom_point(aes(x = Year, y = mean_density), shape = 21, fill = "dark grey", size = 3)+
+        theme_classic()
+    })
+  
+  return(output)
+  
+}
+
+```
+
+```{r}
+
+#Determine the same density measure for 3 years
+GRID_DENSITY3yr <- multiyr_density(3, GRID_DENSITY)
+
+SETTLE3 <- SETTLE3 %>% 
+  #Join in data over the past 3 years
+  left_join(GRID_DENSITY3yr %>% dplyr::select(ID, mean_3yr_density, Year) %>% rename(POLY_ID = ID),
+            by = c("POLY_ID", "Year"))
+
+```
+
+```{r}
+
+SETTLE4 <- subset(SETTLE3, is.na(DENSITY) == FALSE)
+
+#Centre median elevation to be in the same units as other elevation measurements.
+SETTLE4$Median2 <- SETTLE4$Median - 90
+
+```
+
+Finally, we will determine RELATIVE density in each year
+
+```{r}
+
+SETTLE4 <- SETTLE4 %>% 
+  group_by(Year) %>% 
+  mutate(rel_density = DENSITY - mean(DENSITY),
+         rel_density3yr = mean_3yr_density - mean(mean_3yr_density, na.rm = T))
+
+```
+
+2. Determine reproductive output in the previous year
+
+```{r}
+
+data("FLEDGE_DATA")
+
+```
+
+As above, we preference data from nest info, then nest checks, and finally chick info. 
+
+```{r}
+
+FLEDGE_DATA$Fledge_combo <- ifelse(!is.na(FLEDGE_DATA$Fledge_NestInfo), FLEDGE_DATA$Fledge_NestInfo, ifelse(!is.na(FLEDGE_DATA$Fledge_NestCheck), FLEDGE_DATA$Fledge_NestCheck, FLEDGE_DATA$Fledge_ChickInfo))
+
+```
+
+There are some records that have nest info but there is no written fledging data. We assumed that these nests produced no fledglings (i.e. if the nest was being monitored we would know if there were some fledglings).
+
+```{r}
+
+FLEDGE_DATA$Fledge_combo <- ifelse(is.na(FLEDGE_DATA$Fledge_combo) & !is.na(FLEDGE_DATA$NestID), 0, FLEDGE_DATA$Fledge_combo)
+
+```
+
+There are some individuals who have no nestID, and also no fledging data (some have data, but we didn't pick up the nest on the maps e.g. 1984 when we only had territory maps). These are kept as NAs, but below we will create a new column and estimate their output for our public information analysis.
+
+Check that data looks reasonable.
+
+```{r}
+
+FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_combo, na.rm = T),
+            SE = sd(Fledge_combo, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))}
+
+```
+
+Now that we know how many individuals fledged in a given territory, we want to calculate an absolute value and a value relative fledling value in each grid square each year.
+
+We have a number of records with no nest info or fledging info. If we make them 0, we will artificially deflate fledging estimates at a site. If we make them NA, this will artifically inflate fledging estimates. This is a problem, as the occurence of these no nest/no fledging records is not evenly spread throughout the data (e.g. they are more common in early years). Therefore, we instead gave them a value equal to the average fledging output of other birds of their status in the year considered.
+
+How many NAs are there? How many per year?
+
+```{r}
+
+(sum(is.na(FLEDGE_DATA$Fledge_combo))/nrow(FLEDGE_DATA))*100
+
+```
+
+~19% of nests have no fledgling data
+
+```{r}
+
+FLEDGE_DATA %>% 
+  group_by(Year) %>%
+  summarise(Total_NA = sum(is.na(Fledge_combo)),
+            Perc_NA = Total_NA/n()) %>% 
+  {ggplot(.)+
+      geom_col(aes(x = Year, y = Perc_NA))+
+      theme_ubuntu()}
+
+```
+
+Some years have up to 50% of nests without fledgling data!
+
+```{r}
+
+all(is.na(FLEDGE_DATA$Fledge_combo) & !is.na(FLEDGE_DATA$NestID))
+
+```
+
+These are all cases where a territory is recorded, but nest was not found on the territory.
+
+One way to overcome this is to give these empty ones the fledgling value that was most likely in that year.
+
+```{r}
+
+multinom_dat <- FLEDGE_DATA %>% 
+  filter(!is.na(Fledge_combo)) %>% 
+  group_by(Year, Fledge_combo) %>% 
+  summarise(n = n()) %>% 
+  mutate(prop = n/sum(n))
+
+FLEDGE_DATA <- FLEDGE_DATA %>% 
+  mutate(Fledge_est = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+                               .f = function(nr_fledge, current_yr, multinom_dat){
+                                 
+                                 if(is.na(nr_fledge)){
+                                   
+                                   sub_multinom <- filter(multinom_dat, Year == current_yr)
+                                   
+                                   return(sub_multinom[which(sub_multinom$prop == max(sub_multinom$prop)), ]$Fledge_combo)
+                                   
+                                 } else {
+                                   
+                                   return(nr_fledge)
+                                   
+                                 }
+                                 
+                               }, multinom_dat = multinom_dat))
+
+```
+
+Another way we could overcome this could be to fill them with a multinomial distribution (0, 1, 2, 3) based on the proportion of fledgling production in each year.
+
+```{r}
+
+FLEDGE_DATA <- FLEDGE_DATA %>% 
+  mutate(Fledge_est_stochastic = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+                               .f = function(nr_fledge, current_yr, multinom_dat){
+                                 
+                                 if(is.na(nr_fledge)){
+                                   
+                                   sub_multinom <- filter(multinom_dat, Year == current_yr)
+                                   
+                                   return(seq(0, nrow(sub_multinom) - 1, 1)[which(rmultinom(1, 1, prob = sub_multinom$prop) == 1)])
+                                   
+                                 } else {
+                                   
+                                   return(nr_fledge)
+                                   
+                                 }
+                                 
+                               }, multinom_dat = multinom_dat))
+
+```
+
+Finally, we could just assume that any NA is a 0.
+
+```{r}
+
+FLEDGE_DATA <- FLEDGE_DATA %>% 
+  mutate(Fledge_est_consv = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+                               .f = function(nr_fledge, current_yr, multinom_dat){
+                                 
+                                 if(is.na(nr_fledge)){
+                                   
+                                   return(0)
+                                   
+                                 } else {
+                                   
+                                   return(nr_fledge)
+                                   
+                                 }
+                                 
+                               }, multinom_dat = multinom_dat))
+
+```
+
+```{r}
+
+old <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_combo, na.rm = T),
+            SE = sd(Fledge_combo, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("No estimation")}
+
+consv <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_est_consv, na.rm = T),
+            SE = sd(Fledge_est_consv, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("Consv estimation")}
+
+new <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_est, na.rm = T),
+            SE = sd(Fledge_est, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("Most likely nest")}
+
+newest <- FLEDGE_DATA %>% 
+  group_by(Year) %>% 
+  summarise(mean = mean(Fledge_est_stochastic, na.rm = T),
+            SE = sd(Fledge_est_stochastic, na.rm = T)/sqrt(n()),
+            lower = mean - SE,
+            upper = mean + SE) %>% 
+  {ggplot(.)+
+      geom_errorbar(aes(x = Year, ymin = lower, ymax = upper))+
+      geom_point(aes(x = Year, y = mean))+
+      ggtitle("Multinomial")}
+
+cowplot::plot_grid(old, consv, new, newest, nrow = 2, ncol = 2)
+
+```
+
+There are two years where there is no recorded reproductive success (2002 & 2007). I check back the records and this seems to be correct.
+
+If we use the multi-nomial approach we would need to rerun our analysis multiple times to account for stochasticity.
+
+Finally, we want to determine the average number of fledglings in each grid square in each year. We do this with all our interpolation methods.
+
+```{r}
+
+avg_fledge <- FLEDGE_DATA %>%
+  mutate(POLY_ID = over(TERR_PTS, GRID_100)$id) %>% 
+  group_by(Year, POLY_ID) %>% 
+  summarise(mean_fledge_consv = mean(Fledge_est_consv),
+            mean_fledge_est = mean(Fledge_est),
+            mean_fledge_multinom = mean(Fledge_est_stochastic)) %>% 
+  ungroup()
+
+```
+
+We also want to consider average number of fledglings in each grid square over the past 3 years (median age at recruitment).
+
+```{r}
+
+#Go through and group data by 7 year blocks.
+avg_fledge_3yr <- pmap_df(.l = list(Settle_year = (min(FLEDGE_DATA$Year) + 3):max(FLEDGE_DATA$Year)),
+                          .f = function(Settle_year, FLEDGE_DATA){
+                            
+                            SUB <- FLEDGE_DATA %>%
+                              mutate(POLY_ID = over(TERR_PTS, GRID_100)$id) %>% 
+                              filter(Year %in% (Settle_year - 3):(Settle_year - 1)) %>% 
+                              group_by(POLY_ID) %>% 
+                              #Take mean of fledge_est and record number of year used
+                              summarise(mean_fledge_est3yr = mean(Fledge_est),
+                                        min_yr = min(Year), max_yr = max(Year),
+                                        diff = max_yr - min_yr) %>% 
+                              #Remove those cases with no grid squares in the whole time period.
+                              filter(diff == 2) %>% 
+                              mutate(Year = Settle_year)
+                            
+                            return(SUB)
+                            
+                          }, FLEDGE_DATA = FLEDGE_DATA)
+
+```
+
+Link this to our settlement data and then determine relative values for each year
+
+```{r}
+
+SETTLE4 <- SETTLE4 %>%
+  mutate(POLY_ID = as.integer(POLY_ID)) %>% 
+  left_join(avg_fledge %>% mutate(Year = Year + 1), by = c("Year", "POLY_ID")) %>%
+  left_join(avg_fledge_3yr %>% dplyr::select(POLY_ID, Year, mean_fledge_est3yr), by = c("Year", "POLY_ID")) %>% 
+  ungroup() %>% 
+  #When there were no territories, we make fledgling numbers 0.
+  mutate(mean_fledge_consv = pmap_dbl(.l = list(mean_fledge_consv = .$mean_fledge_consv),
+                                .f = function(mean_fledge_consv){
+                                  
+                                  ifelse(is.na(mean_fledge_consv), 0, mean_fledge_consv)
+                                  
+                                }),
+         mean_fledge_est = pmap_dbl(.l = list(mean_fledge_est = .$mean_fledge_est),
+                                .f = function(mean_fledge_est){
+                                  
+                                  ifelse(is.na(mean_fledge_est), 0, mean_fledge_est)
+                                  
+                                }),
+         mean_fledge_multinom = pmap_dbl(.l = list(mean_fledge_multinom = .$mean_fledge_multinom),
+                                .f = function(mean_fledge_multinom){
+                                  
+                                  ifelse(is.na(mean_fledge_multinom), 0, mean_fledge_multinom)
+                                  
+                                }),
+         mean_fledge_est3yr = pmap_dbl(.l = list(mean_fledge_est3yr = .$mean_fledge_est3yr,
+                                                 Sub_Area = .$Sub_Area, Current_Year = .$Year),
+                                .f = function(mean_fledge_est3yr, Sub_Area, Current_Year, Area_info){
+                                  
+                                  if(Current_Year >= 1987){
+                                  
+                                  ifelse(!all(filter(Area_info, Year %in% (Current_Year - 3):Current_Year)[, Sub_Area]), NA,
+                                         ifelse(is.na(mean_fledge_est3yr), 0, mean_fledge_est3yr))
+                                    
+                                  } else {
+                                    
+                                    NA
+                                    
+                                  }
+                                  
+                                }, Area_info = .GlobalEnv$AREA)) %>% 
+  group_by(Year) %>% 
+  mutate(rel_fledge_consv = mean_fledge_consv - mean(mean_fledge_consv),
+         rel_fledge_est = mean_fledge_est - mean(mean_fledge_est),
+         rel_fledge_multinom = mean_fledge_multinom - mean(mean_fledge_multinom),
+         rel_fledge_est3yr = mean_fledge_est3yr - mean(mean_fledge_est3yr, na.rm = T))
+
+```
+
+------------------
+
+We now take our settlement data and turn it into count data. 
+
+```{r}
+
+SETTLE_poisson_100 <- SETTLE4 %>%
+  group_by(Year, POLY_ID) %>%
+  summarise(nr_Settle = sum(Settle),
+            lgl_Settle = nr_Settle > 0,
+            Median2 = Median2[1],
+            Sub_Area = Sub_Area[1],
+            Gully_Dist = Gully_Dist[1],
+            Coast_Dist = Coast_Dist[1],
+            Grid_area = Grid_area[1],
+            rel_density = rel_density[1],
+            rel_density3yr = rel_density3yr[1],
+            mean_fledge_consv = mean_fledge_consv[1],
+            rel_fledge_consv = rel_fledge_consv[1],
+            mean_fledge_est = mean_fledge_est[1],
+            rel_fledge_est3yr = rel_fledge_est3yr[1],
+            rel_fledge_est = rel_fledge_est[1],
+            mean_fledge_multinom = mean_fledge_multinom[1],
+            rel_fledge_multinom = rel_fledge_multinom[1]) %>%
+  arrange(Year)
+
+#We save this as part of our package because we'll use the same data for our analysis of cues.
+
+```
+
+```{r, eval = FALSE}
+
+usethis::use_data(SETTLE_poisson_100, overwrite = T)
+
+```
+
+------------------------------
+
+###Territory vacancy analysis
+
+We want to determine whether there is a relationship between the elevation of a territory and the probability that it is vacated. To do this, we first need to determine vacancy rates.
+
+We load our shapefile containing all recorded territories from 1984 - 2016 with zonal statistics (e.g. median elevation, distance to coast etc.).
+
+```{r}
+
+data("Territories")
+
+#Extract territory polygon data and order by maleID
+#We cannot truly determine the behaviour of an unbanded bird from one year to the next (i.e. we don't know if it's a new unbanded bird or the same one!), so we removed all records from unbanded birds (any unbanded bird was included as an NA).
+TERR <- Territories@data %>%
+  arrange(MaleID) %>%
+  filter(!is.na(MaleCode)) %>%
+  mutate(Year = as.numeric(Year))
+
+```
+
+------------
+
+There will be some territories where no median could be calculated (i.e. territories too small to have different elevations). These are removed from our analysis.
+
+```{r}
+
+TERR2 <- subset(TERR, is.na(Median) == FALSE)
+TERR2$MaleID <- as.factor(TERR2$MaleID)
+
+#Make median elevation in cm above MHT from 1971 (see last paper)
+TERR2$Median2 <- TERR2$Median - 90
+
+nrow(TERR) - nrow(TERR2)
+
+```
+
+We lose 8 data points from this subset.
+
+---------------
+
+For each year, we want to determine if a male stayed in the population or left. If a male left but a female stayed this was still considered a territory vacancy (a behavioural choice made by the male). We consider a territory to be vacated as 1, and not vacated as 0.
+
+```{r}
+
+terr.list <- list()
+
+TERR2$Vacated <- NA
+
+TERR2$Year <- as.numeric(as.character(TERR2$Year))
+
+TERR2$MaleID <- factor(TERR2$MaleID)
+
+NUM <- 1
+
+for(i in levels(TERR2$MaleID)){
+  
+  SUB <- subset(TERR2, MaleID == i)
+  
+  for(j in 1:(nrow(SUB) - 1)){
+    
+    if(nrow(SUB) == 1){
+      
+      if(SUB$Year == 2016){
+        
+        SUB$Note <- "2016"
+        SUB$Vacated <- NA
+        
+      } else {
+        
+        SUB$Note <- "SingleYr"
+        SUB$Vacated <- 1
+        
+      }
+      
+    } else if(nrow(SUB) > 1){
+      
+      if((SUB$Year[j + 1] - SUB$Year[j]) == 1){
+        
+        SUB$Note[j] <- "None"
+        SUB$Vacated[j] <- 0
+        
+      } else {
+        
+        SUB$Note[j] <- "MissedYr?"
+        SUB$Vacated[j] <- 1
+        
+      }
+      
+    }
+    
+  }
+  
+  if(SUB$Year[nrow(SUB)] == 2016){
+    
+    SUB$Note[nrow(SUB)] <- "2016"
+    SUB$Vacated[nrow(SUB)] <- 0
+    
+  } else if(is.na(SUB$Vacated[nrow(SUB)]) == TRUE){
+    
+    SUB$Note[nrow(SUB)] <- "None"
+    SUB$Vacated[nrow(SUB)] <- 1
+    
+  }
+  
+  terr.list[[NUM]] <- SUB
+  NUM <- NUM + 1
+  
+}
+
+VACATE <- plyr::rbind.fill(terr.list)
+
+```
+
+There are some data points where an individual is missing in one year, but returns in later years (171 points, ~5% of total data). I assumed that these points were either mistakes (e.g. where an individual was not sighted for a year) or cases of re-settlement. They were removed from the analysis to prevent over-estimation of territory vacancies.
+
+In addition, we cannot determine vacancy rates of 2016 territories (i.e. we don't know what happened in 2017). These were also removed.
+
+```{r}
+
+VACATE2 <- subset(VACATE, Note != "MissedYr?" & Note != "2016")
+VACATE2$Note <- NULL
+
+```
+
+Next we need to consider the birds where we only have a single year of data. In some cases, this may be because a bird on the edge of the study area was included in maps one year and not the next, in which case it shouldn't be used. In other cases they may have only been surveyed once before a genuine territory vacancy occured. There are only a few of these individuals so I checked them manually in the Access database.
+
+```{r}
+
+VACATE2 <- subset(VACATE2, MaleCode != "WR011R6" & MaleCode != "WR111B4" &
+                   MaleCode != "RB022W1" & MaleCode != "WR100GY3" & 
+                   MaleCode != "RB202W4" & MaleCode != "RB200G5" & 
+                   MaleCode != "RB022W4" & MaleCode != "WR102WB4" & 
+                   MaleCode != "WR200GY3" & MaleCode != "GW200W3" & 
+                   MaleCode != "GW201W3" & MaleCode != "GW021B1" & 
+                   MaleCode != "GW011G4" & MaleCode != "GW110G4" & 
+                   MaleCode != "GW002G5" & MaleCode != "RG-CCLJ")
+
+VACATE2$MaleID <- factor(VACATE2$MaleID)
+
+```
+
+Most birds were legitimately only seen once (i.e. in main study area and well surveyed). Those that weren't were removed (above).
+
+------------
+
+```{r}
+
+(nrow(VACATE) - nrow(VACATE2))/nrow(VACATE)
+
+nrow(VACATE2)
+
+```
+
+We lose ~9% of our data with this subset, but we still have 3,116 territory points.
+
+After removing all the birds that we don't want to analyse we can assess the dataset again.
+
+```{r}
+
+nrow(VACATE2)
+
+length(levels(factor(VACATE2$MaleID)))
+
+```
+
+Our dataset for this territory vacancy analysis contains a total of 3,116 territories from 465 males.
+
+```{r}
+
+nrow(subset(VACATE2, Vacated == 1))
+
+```
+
+We had 357 recorded territory vacancy events.
+
+```{r}
+
+terr.list <- list()
+NUM <- 1
+
+for(i in levels(VACATE2$MaleID)){
+  
+  SUB <- subset(VACATE2, MaleID == i)
+  
+  terr.list[[NUM]] <- data.frame(Year = nrow(SUB))
+  
+  NUM <- NUM + 1
+  
+}
+
+mean((plyr::rbind.fill(terr.list))$Year)
+
+```
+
+Save data for analysis
+
+```{r, eval = FALSE}
+
+VacatedTerritories <- VACATE2
+
+usethis::use_data(VacatedTerritories, overwrite = T)
+
+```

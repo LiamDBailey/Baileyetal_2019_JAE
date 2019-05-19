@@ -1,0 +1,189 @@
+---
+title: "Change in territory vacancy patterns"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vacancy}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, echo = FALSE, message = FALSE}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+
+#Load libraries
+library(raster)
+library(rgdal)
+library(deldir)
+library(rgeos)
+library(lme4)
+library(MuMIn)
+library(sjPlot)
+library(piecewiseSEM)
+library(extrafont)
+library(plotly)
+library(webshot)
+library(RSelenium)
+library(DHARMa)
+library(car)
+library(boot)
+library(MyFuncs)
+library(dplyr)
+
+```
+
+Load our data
+
+```{r}
+
+data("VacatedTerritories")
+
+```
+
+We want to determine whether there is an overall relationship between median territory elevation and territory vacancy rates. As before, we will use a mixed effects model with MaleID and Area as random effects.
+
+We considered:
+
+- Median elevation of a territory.
+- Year.
+- Distance from the coast (this includes information on territory quality, both absolute status and territory quality e.g. 1st/2nd row).
+- Distance from the gully.
+- Status (To better differentiate between leapfrog and resident behaviour)
+
+We standardised our variables for analysis (sd = 1). This was needed to acheive convergence with variables that have widely different scales. However, we did not centre to a mean of 0 as log transformation was used.  
+
+```{r}
+
+#We want to use centred variables
+VacatedTerritories$Median3     <- transform(x = VacatedTerritories$Median2, type = "standard.log")
+VacatedTerritories$Year_group  <- VacatedTerritories$Year - min(VacatedTerritories$Year)
+VacatedTerritories$Coast_Dist2 <- transform(x = VacatedTerritories$Coast_Dist, type = "standard.log")
+VacatedTerritories$Gully_Dist2 <- transform(x = VacatedTerritories$Gully_Dist, type = "standard.log")
+
+```
+
+We considered a logarithmic relationship for elev, coast distance and gully distance as we predict that the benefit of these variables will decline.
+
+Our models are not mutually exclusive and we have no issue with power. Therefore, we are going to just look at the global model.
+
+```{r}
+
+library(spaMM)
+
+full_mod <- fitme(Vacated ~ log(Median3) * Year_group + Status + (1|Sub_Area), family = "binomial", data = VacatedTerritories, method = "PQL/L")
+
+```
+
+The only reason why we wouldn't do this is if there were issues with VIF.
+
+```{r}
+
+vif(glm(Vacated ~ log(Median3) + Year_group + Status, family = "binomial", data = VacatedTerritories))
+
+```
+
+Our variables have reasonable VIF levels. Therefore, we can include them with no concern how they will impact our important variables.
+
+1. Test residuals using DHARMa package
+
+```{r, message = FALSE, fig.height=5, fig.width=5}
+
+set.seed(666)
+
+simResiduals <- simulateResiduals(fittedModel = full_mod, n = 5000)
+
+plotSimulatedResiduals(simulationOutput = simResiduals)
+
+```
+
+Seems ok.
+
+With plotly
+
+```{r, fig.width = 7, fig.height = 5}
+
+library(plotly)
+
+new_dat <- expand.grid(Median3 = seq(min(VacatedTerritories$Median3),
+                                     max(VacatedTerritories$Median3), length.out = 100),
+                       Year_group = seq(min(VacatedTerritories$Year_group),
+                                        max(VacatedTerritories$Year_group), 1),
+                       Grid_area2 = mean(VacatedTerritories$Grid_area2), Coast_Dist2 = 1,
+                       Gully_Dist2 = 1, Status = "resident")
+
+new_dat$pred <- as.numeric(predict(full_mod, newdata = new_dat, re.form = NA)[, 1])
+new_dat$Median2 <- back.transform(x = new_dat$Median3,
+                                  y = VacatedTerritories$Median2,
+                                  type = "standard.log")
+
+(Fig3 <- plot_ly(new_dat, x = ~Year_group, y = ~Median2, z = ~pred, type = "contour", showlegend = F, 
+        hoverlabel = list(font =  list(family = "Ubuntu")),
+        contours = list(coloring = "fill",
+                        showlabels = TRUE,
+                        labelfont = list(family = "Ubuntu",
+                                         size = 15,
+                                         color = "white")),
+        colorbar = list(tickfont = list(family = "Ubuntu",
+                                        size = 20),
+                        title = "Vacancy \n probability",
+                        titlefont = list(family = "Ubuntu",
+                                         size = 15))) %>%
+  layout(xaxis = list(title = "Year",
+                  titlefont = list(family = "Ubuntu",
+                                   size = 20),
+                  tickmode = "array",
+                  tickvals = seq(1985, 2015, 5) - min(VacatedTerritories$Year),
+                  ticktext = seq(1985, 2015, 5)),
+         yaxis = list(title = "Elevation (cm above MHT)",
+                      titlefont = list(family = "Ubuntu",
+                                   size = 20))))
+
+```
+
+**SAVING AS PDF IS NOT POSSIBLE IN R WITHOUT A PLOTLY PREMIUM SUBSCRICPTION**
+**WE EXPORT THE IMAGE TO WEB AND SAVE AS PDF FROM THERE**
+
+Finally, we want to determine 95 and 99.5% confidence intervals for each point.
+
+To do this, we will refit our model with lme4 because the confint method with spaMM doesn't work well (keeps crashing). The model parameter estimates are identical.
+
+```{r}
+
+library(kableExtra)
+
+CI_mod <- glmer(Vacated ~ log(Median3) * Year_group + Status + (1|Sub_Area),
+                  data = VacatedTerritories, family = binomial(logit))
+
+CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
+             confint(CI_mod, level = 0.995, method = "Wald")[-1, ])) %>%
+  mutate(CI95 = paste(round(`2.5 %`, 4), round(`97.5 %`, 4), sep = "/"),
+         CI995 = paste(round(`0.25 %`, 4), round(`99.75 %`, 4), sep = "/"),
+         Estimate = format(as.numeric(fixef(CI_mod))),
+         Variable = names(fixef(CI_mod))) %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
+
+CI_25ha <- CIs %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
+
+```
+
+Determine R2 values for reviewers. To do this we need to use our lme4 model.
+
+Add this to our CI estimates.
+
+```{r}
+
+library(kableExtra)
+
+R2 <- MuMIn::r.squaredGLMM(CI_mod)
+
+CI_25ha %>% 
+  mutate(R2m = round(R2[1, "R2m"], 2),
+         R2c = round(R2[1, "R2c"], 2)) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = "bordered")
+
+```

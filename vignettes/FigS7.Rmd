@@ -1,0 +1,38 @@
+---
+title: "FigS7: Map of territory settlement in later years"
+author: "Liam D. Bailey"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{FigS7}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Load ggplot themes
+
+```{r}
+
+devtools::load_all()
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
+
+library(rgeos)
+library(rgdal)
+library(raster)
+library(ggplot2)
+library(dplyr)
+library(extrafont)
+library(MyFuncs)
+
+```
+
+Run plotting function
+
+```{r, fig.height=7, fig.width=21}
+
+plot_figS7()
+
+#Save plot
+ggsave("../plots/Figure_S7.pdf", width = 21, height = 5, dpi = 300)
+
+```
