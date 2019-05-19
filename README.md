@@ -10,3 +10,7 @@ The repository is structured using the framework of an R package.
 - All data are saved as `.rda` files in the package `./data` folder.
 - All analyses and plot creation is included as vignettes in the `./vignettes` folder.
 - Descriptions of all data used for the analyses are stored in `./man`.
+
+## Working with the repository
+
+This repository functions as an R package. The easiest way to access all data and run code is by loading the package in R. This can be done using the binary associated with the latest release (LINK!!) or using `devtools::install_github`.
