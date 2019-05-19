@@ -15,4 +15,4 @@ The repository is structured using the framework of an R package.
 
 ## Working with the repository
 
-This repository functions as an R package. The easiest way to access all data and run code is by loading the package in R. This can be done using the binary associated with the latest release (LINK!!) or using `devtools::install_github`.
+This repository functions as an R package. The easiest way to access all data and run code is by loading the package in R. This can be done using the binary associated with the latest release or using `devtools::install_github`.
