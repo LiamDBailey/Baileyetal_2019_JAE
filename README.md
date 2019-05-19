@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/187512335.svg)](https://zenodo.org/badge/latestdoi/187512335)
+
 # Baileyetal_2019_JAE
 Code and data to reproduce results from Bailey et al. 2019 in Journal of Animal Ecology
 
