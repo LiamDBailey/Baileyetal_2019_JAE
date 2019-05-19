@@ -25,25 +25,6 @@ devtools::load_all()
 devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
 
 #Load libraries
-library(raster)
-library(rgdal)
-library(deldir)
-library(rgeos)
-library(lme4)
-library(ggplot2)
-library(extrafont)
-library(plotly)
-library(webshot)
-library(RSelenium)
-library(DHARMa)
-library(arm)
-library(boot)
-library(dplyr)
-library(purrr)
-library(car)
-library(spaMM)
-library(glmmTMB)
-library(foreach)
 library(MyFuncs)
 
 ```
@@ -119,7 +100,7 @@ SETTLE2 <- TERR2 %>%
   #Take the first record for every male
   slice(1) %>%
   #Go through each record...
-  left_join(pmap_df(.l = list(MaleID = .$MaleID,
+  left_join(purrr::pmap_df(.l = list(MaleID = .$MaleID,
                               Year = .$Year,
                               Sub_area = .$Sub_Area),
                     .f = function(MaleID, Year, Sub_area, used_areas){
@@ -212,7 +193,7 @@ for(i in 1985:2016){
   GRID_SUB2 <- GRID_SUB[(GRID_SUB$POLY_ID %in% SETTLED$POLY_ID) == FALSE, ]
   GRID_SUB2$Settle <- 0
   
-  FULL <- plyr::rbind.fill(SETTLED, GRID_SUB2)
+  FULL <- dplyr::bind_rows(SETTLED, GRID_SUB2)
   FULL <- FULL[order(FULL$POLY_ID), ]
   
   FULL$Year <- i
@@ -223,7 +204,7 @@ for(i in 1985:2016){
   
 }
 
-SETTLE3 <- plyr::rbind.fill(sett.list) %>% 
+SETTLE3 <- dplyr::bind_rows(sett.list) %>% 
   mutate(POLY_ID = as.character(POLY_ID))
 
 ```
@@ -293,7 +274,7 @@ for(i in 1984:2016){
   
 }
 
-GRID_DENSITY <- plyr::rbind.fill(terr.list) %>% mutate(ID = as.character(ID)) %>% 
+GRID_DENSITY <- dplyr::bind_rows(terr.list) %>% mutate(ID = as.character(ID)) %>% 
   arrange(Year, ID)
 
 ```
@@ -313,7 +294,7 @@ Write a function to extract density
 #Create function to determine density in the past X years
 multiyr_density <- function(yr_range, grid_data){
   
-  output <- pmap_df(.l = list(Settle_year = (min(grid_data$Year) + yr_range):max(grid_data$Year)),
+  output <- purrr::pmap_df(.l = list(Settle_year = (min(grid_data$Year) + yr_range):max(grid_data$Year)),
                              .f = function(Settle_year, grid_data){
                                
                                #Subset out all grid squares from the previous X years
@@ -493,7 +474,7 @@ multinom_dat <- FLEDGE_DATA %>%
   mutate(prop = n/sum(n))
 
 FLEDGE_DATA <- FLEDGE_DATA %>% 
-  mutate(Fledge_est = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+  mutate(Fledge_est = purrr::pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
                                .f = function(nr_fledge, current_yr, multinom_dat){
                                  
                                  if(is.na(nr_fledge)){
@@ -517,7 +498,7 @@ Another way we could overcome this could be to fill them with a multinomial dist
 ```{r}
 
 FLEDGE_DATA <- FLEDGE_DATA %>% 
-  mutate(Fledge_est_stochastic = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+  mutate(Fledge_est_stochastic = purrr::pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
                                .f = function(nr_fledge, current_yr, multinom_dat){
                                  
                                  if(is.na(nr_fledge)){
@@ -541,7 +522,7 @@ Finally, we could just assume that any NA is a 0.
 ```{r}
 
 FLEDGE_DATA <- FLEDGE_DATA %>% 
-  mutate(Fledge_est_consv = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+  mutate(Fledge_est_consv = purrr::pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
                                .f = function(nr_fledge, current_yr, multinom_dat){
                                  
                                  if(is.na(nr_fledge)){
@@ -642,7 +623,7 @@ We also want to consider average number of fledglings in each grid square over t
 ```{r}
 
 #Go through and group data by 3 year blocks.
-avg_fledge_3yr <- pmap_df(.l = list(Settle_year = (min(FLEDGE_DATA$Year) + 3):max(FLEDGE_DATA$Year)),
+avg_fledge_3yr <- purrr::pmap_df(.l = list(Settle_year = (min(FLEDGE_DATA$Year) + 3):max(FLEDGE_DATA$Year)),
                           .f = function(Settle_year, FLEDGE_DATA){
                             
                             SUB <- FLEDGE_DATA %>%
@@ -672,25 +653,25 @@ SETTLE4 <- SETTLE4 %>%
   left_join(avg_fledge_3yr %>% dplyr::select(POLY_ID, Year, mean_fledge_est3yr), by = c("Year", "POLY_ID")) %>% 
   ungroup() %>% 
   #When there were no territories, we make fledgling numbers 0.
-  mutate(mean_fledge_consv = pmap_dbl(.l = list(mean_fledge_consv = .$mean_fledge_consv),
+  mutate(mean_fledge_consv = purrr::pmap_dbl(.l = list(mean_fledge_consv = .$mean_fledge_consv),
                                 .f = function(mean_fledge_consv){
                                   
                                   ifelse(is.na(mean_fledge_consv), 0, mean_fledge_consv)
                                   
                                 }),
-         mean_fledge_est = pmap_dbl(.l = list(mean_fledge_est = .$mean_fledge_est),
+         mean_fledge_est = purrr::pmap_dbl(.l = list(mean_fledge_est = .$mean_fledge_est),
                                 .f = function(mean_fledge_est){
                                   
                                   ifelse(is.na(mean_fledge_est), 0, mean_fledge_est)
                                   
                                 }),
-         mean_fledge_multinom = pmap_dbl(.l = list(mean_fledge_multinom = .$mean_fledge_multinom),
+         mean_fledge_multinom = purrr::pmap_dbl(.l = list(mean_fledge_multinom = .$mean_fledge_multinom),
                                 .f = function(mean_fledge_multinom){
                                   
                                   ifelse(is.na(mean_fledge_multinom), 0, mean_fledge_multinom)
                                   
                                 }),
-         mean_fledge_est3yr = pmap_dbl(.l = list(mean_fledge_est3yr = .$mean_fledge_est3yr,
+         mean_fledge_est3yr = purrr::pmap_dbl(.l = list(mean_fledge_est3yr = .$mean_fledge_est3yr,
                                                  Sub_Area = .$Sub_Area, Current_Year = .$Year),
                                 .f = function(mean_fledge_est3yr, Sub_Area, Current_Year, Area_info){
                                   
@@ -825,7 +806,7 @@ SETTLE2 <- TERR2 %>%
   #Take the first record for every male
   slice(1) %>%
   #Go through each record...
-  left_join(pmap_df(.l = list(MaleID = .$MaleID,
+  left_join(purrr::pmap_df(.l = list(MaleID = .$MaleID,
                               Year = .$Year,
                               Sub_area = .$Sub_Area),
                     .f = function(MaleID, Year, Sub_area, used_areas){
@@ -917,7 +898,7 @@ for(i in 1985:2016){
   GRID_SUB2 <- GRID_SUB[(GRID_SUB$id %in% SETTLED$id) == FALSE, ]
   GRID_SUB2$Settle <- 0
   
-  FULL <- plyr::rbind.fill(SETTLED, GRID_SUB2)
+  FULL <- dplyr::bind_rows(SETTLED, GRID_SUB2)
   FULL <- FULL[order(FULL$id), ]
   
   FULL$Year <- i
@@ -928,7 +909,7 @@ for(i in 1985:2016){
   
 }
 
-SETTLE3 <- plyr::rbind.fill(sett.list) %>% 
+SETTLE3 <- dplyr::bind_rows(sett.list) %>% 
   mutate(POLY_ID = as.character(id))
 
 ```
@@ -998,7 +979,7 @@ for(i in 1984:2016){
   
 }
 
-GRID_DENSITY <- plyr::rbind.fill(terr.list)
+GRID_DENSITY <- dplyr::bind_rows(terr.list)
 
 SETTLE3 <- SETTLE3 %>% 
   left_join(GRID_DENSITY %>% rename(POLY_ID = ID) %>% mutate(Year = Year + 1), by = c("POLY_ID", "Year"))
@@ -1012,7 +993,7 @@ Write a function to extra density
 #Create function to determine density in the past X years
 multiyr_density <- function(yr_range, grid_data){
   
-  output <- pmap_df(.l = list(Settle_year = (min(grid_data$Year) + yr_range):max(grid_data$Year)),
+  output <- purrr::pmap_df(.l = list(Settle_year = (min(grid_data$Year) + yr_range):max(grid_data$Year)),
                              .f = function(Settle_year, grid_data){
                                
                                #Subset out all grid squares from the previous 2 years
@@ -1172,7 +1153,7 @@ multinom_dat <- FLEDGE_DATA %>%
   mutate(prop = n/sum(n))
 
 FLEDGE_DATA <- FLEDGE_DATA %>% 
-  mutate(Fledge_est = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+  mutate(Fledge_est = purrr::pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
                                .f = function(nr_fledge, current_yr, multinom_dat){
                                  
                                  if(is.na(nr_fledge)){
@@ -1196,7 +1177,7 @@ Another way we could overcome this could be to fill them with a multinomial dist
 ```{r}
 
 FLEDGE_DATA <- FLEDGE_DATA %>% 
-  mutate(Fledge_est_stochastic = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+  mutate(Fledge_est_stochastic = purrr::pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
                                .f = function(nr_fledge, current_yr, multinom_dat){
                                  
                                  if(is.na(nr_fledge)){
@@ -1220,7 +1201,7 @@ Finally, we could just assume that any NA is a 0.
 ```{r}
 
 FLEDGE_DATA <- FLEDGE_DATA %>% 
-  mutate(Fledge_est_consv = pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
+  mutate(Fledge_est_consv = purrr::pmap_dbl(.l = list(nr_fledge = .$Fledge_combo, current_yr = .$Year),
                                .f = function(nr_fledge, current_yr, multinom_dat){
                                  
                                  if(is.na(nr_fledge)){
@@ -1310,7 +1291,7 @@ We also want to consider average number of fledglings in each grid square over t
 ```{r}
 
 #Go through and group data by 7 year blocks.
-avg_fledge_3yr <- pmap_df(.l = list(Settle_year = (min(FLEDGE_DATA$Year) + 3):max(FLEDGE_DATA$Year)),
+avg_fledge_3yr <- purrr::pmap_df(.l = list(Settle_year = (min(FLEDGE_DATA$Year) + 3):max(FLEDGE_DATA$Year)),
                           .f = function(Settle_year, FLEDGE_DATA){
                             
                             SUB <- FLEDGE_DATA %>%
@@ -1341,25 +1322,25 @@ SETTLE4 <- SETTLE4 %>%
   left_join(avg_fledge_3yr %>% dplyr::select(POLY_ID, Year, mean_fledge_est3yr), by = c("Year", "POLY_ID")) %>% 
   ungroup() %>% 
   #When there were no territories, we make fledgling numbers 0.
-  mutate(mean_fledge_consv = pmap_dbl(.l = list(mean_fledge_consv = .$mean_fledge_consv),
+  mutate(mean_fledge_consv = purrr::pmap_dbl(.l = list(mean_fledge_consv = .$mean_fledge_consv),
                                 .f = function(mean_fledge_consv){
                                   
                                   ifelse(is.na(mean_fledge_consv), 0, mean_fledge_consv)
                                   
                                 }),
-         mean_fledge_est = pmap_dbl(.l = list(mean_fledge_est = .$mean_fledge_est),
+         mean_fledge_est = purrr::pmap_dbl(.l = list(mean_fledge_est = .$mean_fledge_est),
                                 .f = function(mean_fledge_est){
                                   
                                   ifelse(is.na(mean_fledge_est), 0, mean_fledge_est)
                                   
                                 }),
-         mean_fledge_multinom = pmap_dbl(.l = list(mean_fledge_multinom = .$mean_fledge_multinom),
+         mean_fledge_multinom = purrr::pmap_dbl(.l = list(mean_fledge_multinom = .$mean_fledge_multinom),
                                 .f = function(mean_fledge_multinom){
                                   
                                   ifelse(is.na(mean_fledge_multinom), 0, mean_fledge_multinom)
                                   
                                 }),
-         mean_fledge_est3yr = pmap_dbl(.l = list(mean_fledge_est3yr = .$mean_fledge_est3yr,
+         mean_fledge_est3yr = purrr::pmap_dbl(.l = list(mean_fledge_est3yr = .$mean_fledge_est3yr,
                                                  Sub_Area = .$Sub_Area, Current_Year = .$Year),
                                 .f = function(mean_fledge_est3yr, Sub_Area, Current_Year, Area_info){
                                   
@@ -1529,7 +1510,7 @@ for(i in levels(TERR2$MaleID)){
   
 }
 
-VACATE <- plyr::rbind.fill(terr.list)
+VACATE <- dplyr::bind_rows(terr.list)
 
 ```
 
@@ -1610,7 +1591,7 @@ for(i in levels(VACATE2$MaleID)){
   
 }
 
-mean((plyr::rbind.fill(terr.list))$Year)
+mean((dplyr::bind_rows(terr.list))$Year)
 
 ```
 

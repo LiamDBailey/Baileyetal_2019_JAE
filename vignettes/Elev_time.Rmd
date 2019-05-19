@@ -16,13 +16,7 @@ To begin our paper we want to test if there is a change in the population nest e
 devtools::load_all()
 
 library(spaMM)
-library(lme4)
-library(ggplot2)
-library(extrafont)
-library(MuMIn)
-library(nlme)
-library(dplyr)
-library(purrr)
+library(car)
 
 devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
 library(MyFuncs)
@@ -48,13 +42,13 @@ Nest_elevation <- Nest_elevation %>%
          #MaleID as factors
          MaleID = factor(MaleID),
          #Replace Be/Bw as just B. Do the same for F
-         Area = factor(pmap_chr(.l = list(Area = Area),
+         Area = factor(purrr::pmap_chr(.l = list(Area = Area),
                                 .f = function(Area){
                                  
                                   return(ifelse(grepl("B", Area), "B", ifelse(grepl("F", Area), "F", as.character(Area)))) 
                                   
                                 })),
-         AreaB = factor(pmap_chr(.l = list(Area = as.character(Area)),
+         AreaB = factor(purrr::pmap_chr(.l = list(Area = as.character(Area)),
                           .f = ~ifelse(.x == "B", "SeaWall", "NonSeawall"))))
 
 ```
@@ -67,7 +61,7 @@ Test whether we meet assumptions of normality and heteroskedasticity with regula
 
 ```{r, fig.height=5, fig.width=7}
 
-mod1 <- lmer(Z_min ~ Year1 + Method + (1|Area) + (1|MaleID),
+mod1 <- lme4::lmer(Z_min ~ Year1 + Method + (1|Area) + (1|MaleID),
             data = Nest_elevation, REML = TRUE)
 
 qqnorm(residuals(mod1))
@@ -95,7 +89,7 @@ Nest_elevation$Z_bc <- car::bcPower(U = Nest_elevation$Z_min, lambda = lambda)
 
 ```{r, fig.height=5, fig.width=7}
 
-mod2 <- lmer(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
+mod2 <- lme4::lmer(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
             data = Nest_elevation, REML = TRUE)
 
 qqnorm(residuals(mod2))
@@ -259,9 +253,7 @@ Determine elevation change over time. N.B. This will not be a single value due t
 
 ```{r}
 
-library(car)
-
-elev_change <- pmap_dbl(.l = list(Year1 = 1:max(Nest_elevation$Year1)),
+elev_change <- purrr::pmap_dbl(.l = list(Year1 = 1:max(Nest_elevation$Year1)),
                         .f = function(Year1){
                           
                           old <- bcnPowerInverse(fixef(H1)[1] + fixef(H1)[2]*(Year1 - 1), lambda = lambda, gamma = 0)
@@ -298,8 +290,6 @@ Extract model coefficients and CIs.
 
 ```{r}
 
-library(kableExtra)
-
 CIs <- tibble(Variable = names(fixef(H1)),
               Estimate = format(fixef(H1)))
 
@@ -308,7 +298,7 @@ H1_ML <- fitme(Z_bc ~ Year1 + Method + (1|Area) + (1|MaleID),
             data = Nest_elevation, resid.model = ~Method,
             method = "ML")
 
-intervals <- pmap(.l = list(parm = as.character(CIs$Variable)),
+intervals <- purrr::pmap(.l = list(parm = as.character(CIs$Variable)),
      .f = function(parm){
        
        x95 <- confint(H1_ML, parm = parm, level = 0.95, verbose = FALSE)
@@ -320,14 +310,14 @@ intervals <- pmap(.l = list(parm = as.character(CIs$Variable)),
      })
 
 CIs <- CIs %>% 
-  mutate(CI95 = pmap_chr(.l = list(intervals),
+  mutate(CI95 = purrr::pmap_chr(.l = list(intervals),
                           .f = ~paste(format(..1[1], nsmall = 2), format(..1[2], nsmall = 2), sep = "/")),
-         CI995 = pmap_chr(.l = list(intervals),
+         CI995 = purrr::pmap_chr(.l = list(intervals),
                           .f = ~paste(format(..1[3], nsmall = 2), format(..1[4], nsmall = 2), sep = "/")))
 
 CIs %>% 
-  kable() %>%
-  kable_styling(bootstrap_options = "bordered")
+  kableExtra::kable() %>%
+  kableExtra::kable_styling(bootstrap_options = "bordered")
   
 
 ```

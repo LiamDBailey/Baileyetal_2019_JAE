@@ -12,26 +12,9 @@ vignette: >
 ```{r, echo = FALSE, message = FALSE}
 
 devtools::load_all()
-devtools::install_github("LiamDBailey/MyFuncs", upgrade = "nevers")
+devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
 
 #Load libraries
-library(raster)
-library(rgdal)
-library(deldir)
-library(rgeos)
-library(lme4)
-library(MuMIn)
-library(sjPlot)
-library(piecewiseSEM)
-library(extrafont)
-library(plotly)
-library(webshot)
-library(RSelenium)
-library(DHARMa)
-library(dplyr)
-library(car)
-library(foreach)
-library(purrr)
 library(MyFuncs)
 
 ```
@@ -74,8 +57,7 @@ SETTLE_poisson <- filter(SETTLE_poisson, !is.na(rel_density3yr))
 
 ```{r}
 
-library(spaMM)
-full_mod <- fitme(lgl_Settle ~ Year_group * log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + rel_fledge_est3yr + rel_density3yr + Grid_area2 + (1|Sub_Area),
+full_mod <- spaMM::fitme(lgl_Settle ~ Year_group * log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + rel_fledge_est3yr + rel_density3yr + Grid_area2 + (1|Sub_Area),
                   data = SETTLE_poisson, family = binomial(logit), method = "PQL/L")
 
 ```
@@ -87,7 +69,7 @@ Assess linearity of relationships
 SETTLE_poisson %>%
   ungroup() %>%
   mutate(logits = c(predict(full_mod)), Median2 = log(Median2)) %>%
-  select(logits, Year, Median2, rel_fledge_est3yr, rel_density3yr) %>%
+  dplyr::select(logits, Year, Median2, rel_fledge_est3yr, rel_density3yr) %>%
   tidyr::gather(key = "Predictor", value = "Pred_value", -logits) %>%
   ggplot()+
   geom_point(aes(x = Pred_value, y = logits))+
@@ -101,9 +83,9 @@ Test residuals using DHARMa package
 
 set.seed(666)
 
-simResiduals <- simulateResiduals(fittedModel = full_mod, n = 5000)
+simResiduals <- DHARMa::simulateResiduals(fittedModel = full_mod, n = 5000)
 
-plotSimulatedResiduals(simulationOutput = simResiduals)
+DHARMa::plotSimulatedResiduals(simulationOutput = simResiduals)
 
 ```
 
@@ -111,7 +93,7 @@ Test VIF
 
 ```{r}
 
-vif(glm(lgl_Settle ~ Year_group + log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + Grid_area2 + rel_fledge_est3yr + rel_density3yr, family = "binomial", data = SETTLE_poisson))
+car::vif(glm(lgl_Settle ~ Year_group + log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + Grid_area2 + rel_fledge_est3yr + rel_density3yr, family = "binomial", data = SETTLE_poisson))
 
 ```
 
@@ -123,8 +105,8 @@ Test residual of random effects
 
 ```{r}
 
-qqnorm(ranef(full_mod)[[1]])
-qqline(ranef(full_mod)[[1]])
+qqnorm(spaMM::ranef(full_mod)[[1]])
+qqline(spaMM::ranef(full_mod)[[1]])
 
 ```
 
@@ -147,12 +129,12 @@ all_models <- expand.grid(elev = c("", "+ Year_group : log(Median3)"),
   mutate(mod_formula = glue::glue("lgl_Settle ~ Year_group + log(Median3) + Grid_area2 + (1|Sub_Area) {cues}",
                                              cues = paste0(elev, density, food, fledge))) %>% 
   rowwise() %>% 
-  mutate(models_spamm = list(fitme(as.formula(mod_formula), data = SETTLE_poisson, family = binomial(logit), method = "PQL/L")),
-         models_lme4 = list(glmer(as.formula(mod_formula), data = SETTLE_poisson, family = binomial(logit))))
+  mutate(models_spamm = list(spaMM::fitme(as.formula(mod_formula), data = SETTLE_poisson, family = binomial(logit), method = "PQL/L")),
+         models_lme4 = list(lme4::glmer(as.formula(mod_formula), data = SETTLE_poisson, family = binomial(logit))))
 
 #This null model with lme4 is needed to improve fitting for R2
 #Otherwise, the null model is re-estimated every time.
-null_model <- glmer(lgl_Settle ~ 1 + (1|Sub_Area),
+null_model <- lme4::glmer(lgl_Settle ~ 1 + (1|Sub_Area),
                     data = SETTLE_poisson, family = binomial(logit))
 
 #Determine AIC values for every model.
@@ -171,7 +153,7 @@ null_model <- glmer(lgl_Settle ~ 1 + (1|Sub_Area),
          relative_loglik = exp(-0.5*deltaAIC),
          AIC_weight = relative_loglik/sum(relative_loglik),
          Conf_set = cumsum(AIC_weight)) %>% 
-  select(elev:fledge, cAIC, deltaAIC:Conf_set, R2m, R2c, models_spamm, models_lme4, -mod_formula, -relative_loglik, -R2s))
+  dplyr::select(elev:fledge, cAIC, deltaAIC:Conf_set, R2m, R2c, models_spamm, models_lme4, -mod_formula, -relative_loglik, -R2s))
 
 ```
 
@@ -193,14 +175,12 @@ selection_table %>%
 
 Difference in AIC estimation is >=0.02 units. So we can feel pretty confident that we're achieving very similar fits with the two modelling approaches.
 
-Print selection table with kable
+Print selection table with kableExtra::kable
 
 ```{r}
 
-library(kableExtra)
-
 selection_table %>% 
-  select(elev:R2c) %>%
+  dplyr::select(elev:R2c) %>%
   rename(Elevation = elev,
          Food = food,
          Fledglings = fledge,
@@ -212,8 +192,8 @@ selection_table %>%
   mutate_at(vars(wi), ~if(. < 0.01) "<0.01" else format(round(., digits = 2))) %>%
   mutate_at(vars(`Cumulative weight`), ~if(. > 0.9949) ">0.99" else format(round(., digits = 2))) %>%
   ungroup() %>% 
-  kable() %>% 
-  kable_styling(bootstrap_options = "bordered")
+  kableExtra::kable() %>% 
+  kableExtra::kable_styling(bootstrap_options = "bordered")
 
 ```
 
@@ -250,7 +230,7 @@ bin_dat <- SETTLE_poisson %>%
             upper = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[6]),
             n = n()) %>% 
   filter(!is.na(mean_settle)) %>%
-  mutate(Density_numeric = pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
+  mutate(Density_numeric = purrr::pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
                                   .f = function(Density_class){
                                     
                                     return(mean(as.numeric(strsplit(split = ",", x = gsub("\\(|\\]|\\[|\\)", "", Density_class))[[1]])))
@@ -261,10 +241,10 @@ bin_dat <- SETTLE_poisson %>%
 (density <- ggplot()+
   geom_ribbon(data = plot_dat, aes(x = rel_density3yr, ymin = lower, ymax = upper), fill = "dark grey", colour = NA, alpha = 0.25)+
   geom_path(data = plot_dat, aes(x = rel_density3yr, y = pred), lty = 2, size = 1)+
-  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.1, size = 0.75)+
-  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 3, shape = 21, fill = "white", stroke = 1)+
-  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 3, family = "sans")+
-  theme_ubuntu()+
+  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.1, size = 0.325)+
+  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 2, shape = 21, fill = "white", stroke = 1)+
+  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 2, family = "sans")+
+  theme_ubuntu(base_size = 10)+
   theme(text = element_text(family = "sans"))+
   xlab("Relative conspecific density/0.25 ha grid")+
   ylab("Probability of settlement"))
@@ -302,7 +282,7 @@ bin_dat <- SETTLE_poisson %>%
             upper = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[6]),
             n = n()) %>% 
   filter(!is.na(mean_settle)) %>%
-  mutate(Density_numeric = pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
+  mutate(Density_numeric = purrr::pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
                                   .f = function(Density_class){
                                     
                                     return(mean(as.numeric(strsplit(split = ",", x = gsub("\\(|\\]|\\[|\\)", "", Density_class))[[1]])))
@@ -313,11 +293,11 @@ bin_dat <- SETTLE_poisson %>%
 (fledge <- ggplot()+
   geom_ribbon(data = plot_dat, aes(x = rel_fledge_est3yr, ymin = lower, ymax = upper), fill = "dark grey", colour = NA, alpha = 0.25)+
   geom_path(data = plot_dat, aes(x = rel_fledge_est3yr, y = pred), lty = 2, size = 1)+
-  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.035, size = 0.75)+
-  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 3, shape = 21, fill = "white", stroke = 1)+
-  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 3, family = "sans")+
+  geom_errorbar(data = bin_dat, aes(x = Density_numeric, ymin = lower, ymax = upper), width = 0.035, size = 0.325)+
+  geom_point(data = bin_dat, aes(x = Density_numeric, y = mean_settle), size = 2, shape = 21, fill = "white", stroke = 1)+
+  geom_text(data = bin_dat, aes(x = Density_numeric, y = lower - 0.03, label = n), size = 2, family = "sans")+
   scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1))+
-  theme_ubuntu()+
+  theme_ubuntu(base_size = 10)+
   theme(text = element_text(family = "sans"))+
   xlab("Relative conspecific fledgling output/0.25 ha grid")+
   ylab("Probability of settlement"))
@@ -333,13 +313,11 @@ cowplot::plot_grid(density, fledge, nrow = 1, labels = c("a)", "b)"))
 ```{r}
 
 #Save as pdf
-ggsave("../plots/Figure_4.pdf", width = 34, height = 15, units = "cm", dpi = 600)
+ggsave("../plots/Figure_4.pdf", width = 18, height = 7.5, units = "cm", dpi = 600)
 
 ```
 
 ```{r}
-
-library(kableExtra)
 
 CIs <- as.data.frame(cbind(confint(selection_table$models_lme4[[1]], method = "Wald")[-1, ],
              confint(selection_table$models_lme4[[1]], level = 0.995, method = "Wald")[-1, ])) %>%
@@ -347,14 +325,14 @@ CIs <- as.data.frame(cbind(confint(selection_table$models_lme4[[1]], method = "W
   mutate(CI95 = paste(format(`2.5 %`, digits = 2, scientific = -2, nsmall = 2), format(`97.5 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/"),
          CI995 = paste(format(`0.25 %`, digits = 2, scientific = -2, nsmall = 2), format(`99.75 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/")) %>% 
   ungroup() %>%
-  mutate(Estimate = format(round((fixef(selection_table$models_lme4[[1]])), digits = 2), nsmall = 2),
-         Variable = names(fixef(selection_table$models_lme4[[1]]))) %>% 
-  select(Variable, Estimate, CI95, CI995)
+  mutate(Estimate = format(round((spaMM::fixef(selection_table$models_lme4[[1]])), digits = 2), nsmall = 2),
+         Variable = names(spaMM::fixef(selection_table$models_lme4[[1]]))) %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
 
 (CI_25ha <- CIs %>% 
-  select(Variable, Estimate, CI95, CI995) %>% 
-  kable() %>% 
-  kable_styling(bootstrap_options = "bordered"))
+  dplyr::select(Variable, Estimate, CI95, CI995) %>% 
+  kableExtra::kable() %>% 
+  kableExtra::kable_styling(bootstrap_options = "bordered"))
 
 ```
 
@@ -399,8 +377,7 @@ SETTLE_poisson_100 <- filter(SETTLE_poisson_100, !is.na(rel_density3yr))
 
 ```{r}
 
-library(spaMM)
-full_mod_100 <- fitme(lgl_Settle ~ Year_group * log(Median3) + rel_fledge_est3yr + rel_density3yr + Grid_area2 + (1|Sub_Area),
+full_mod_100 <- spaMM::fitme(lgl_Settle ~ Year_group * log(Median3) + rel_fledge_est3yr + rel_density3yr + Grid_area2 + (1|Sub_Area),
                   data = SETTLE_poisson_100, family = binomial(logit), method = "PQL/L")
 
 ```
@@ -412,7 +389,7 @@ Assess linearity of relationships
 SETTLE_poisson_100 %>%
   ungroup() %>%
   mutate(logits = c(predict(full_mod_100)), Median2 = log(Median3)) %>%
-  select(logits, Year, Median2, rel_fledge_est3yr, rel_density3yr) %>%
+  dplyr::select(logits, Year, Median2, rel_fledge_est3yr, rel_density3yr) %>%
   tidyr::gather(key = "Predictor", value = "Pred_value", -logits) %>%
   ggplot()+
   geom_point(aes(x = Pred_value, y = logits))+
@@ -432,9 +409,9 @@ Test residuals using DHARMa package
 
 set.seed(666)
 
-simResiduals <- simulateResiduals(fittedModel = full_mod_100, n = 5000)
+simResiduals <- DHARMa::simulateResiduals(fittedModel = full_mod_100, n = 5000)
 
-plotSimulatedResiduals(simulationOutput = simResiduals)
+DHARMa::plotSimulatedResiduals(simulationOutput = simResiduals)
 
 ```
 
@@ -442,7 +419,7 @@ Test VIF
 
 ```{r}
 
-vif(glm(lgl_Settle ~ Year_group + log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + rel_fledge_est3yr + Grid_area2 + rel_density3yr, family = "binomial", data = SETTLE_poisson_100))
+car::vif(glm(lgl_Settle ~ Year_group + log(Median3) + log(Coast_Dist2) + log(Gully_Dist2) + rel_fledge_est3yr + Grid_area2 + rel_density3yr, family = "binomial", data = SETTLE_poisson_100))
 
 ```
 
@@ -454,8 +431,8 @@ Test residual of random effects
 
 ```{r}
 
-qqnorm(ranef(full_mod_100)[[1]])
-qqline(ranef(full_mod_100)[[1]])
+qqnorm(spaMM::ranef(full_mod_100)[[1]])
+qqline(spaMM::ranef(full_mod_100)[[1]])
 
 ```
 
@@ -494,7 +471,7 @@ bin_dat <- SETTLE_poisson_100 %>%
             upper = as.numeric(binom::binom.wilson(x = sum(lgl_Settle), n = n())[6]),
             n = n()) %>% 
   filter(!is.na(mean_settle)) %>% 
-  mutate(Density_numeric = pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
+  mutate(Density_numeric = purrr::pmap_dbl(.l = list(Density_class = as.character(.$Density_class)),
                                   .f = function(Density_class){
                                     
                                     return(mean(as.numeric(strsplit(split = ",", x = gsub("\\(|\\]|\\[|\\)", "", Density_class))[[1]])))
@@ -516,9 +493,7 @@ ggplot()+
 
 ```{r}
 
-library(kableExtra)
-
-CI_mod <- glmer(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + rel_density3yr + rel_fledge_est3yr + (1|Sub_Area),
+CI_mod <- lme4::glmer(lgl_Settle ~ Year_group * log(Median3) + Grid_area2 + rel_density3yr + rel_fledge_est3yr + (1|Sub_Area),
                   data = SETTLE_poisson_100, family = binomial(logit))
 
 CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
@@ -527,14 +502,14 @@ CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
   mutate(CI95 = paste(format(`2.5 %`, digits = 2, scientific = -2, nsmall = 2), format(`97.5 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/"),
          CI995 = paste(format(`0.25 %`, digits = 2, scientific = -2, nsmall = 2), format(`99.75 %`, digits = 2, scientific = -2, nsmall = 2), sep = "/")) %>% 
   ungroup() %>%
-  mutate(Estimate = format(round((fixef(CI_mod)), digits = 2), nsmall = 2),
-         Variable = names(fixef(CI_mod))) %>% 
-  select(Variable, Estimate, CI95, CI995)
+  mutate(Estimate = format(round((spaMM::fixef(CI_mod)), digits = 2), nsmall = 2),
+         Variable = names(spaMM::fixef(CI_mod))) %>% 
+  dplyr::select(Variable, Estimate, CI95, CI995)
 
 (CI_100ha <- CIs %>% 
-  select(Variable, Estimate, CI95, CI995) %>% 
-    kable() %>% 
-  kable_styling(bootstrap_options = "bordered"))
+  dplyr::select(Variable, Estimate, CI95, CI995) %>% 
+    kableExtra::kable() %>% 
+  kableExtra::kable_styling(bootstrap_options = "bordered"))
 
 ```
 

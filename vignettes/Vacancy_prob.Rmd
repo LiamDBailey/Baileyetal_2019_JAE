@@ -15,23 +15,7 @@ devtools::load_all()
 devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
 
 #Load libraries
-library(raster)
-library(rgdal)
-library(deldir)
-library(rgeos)
-library(lme4)
-library(MuMIn)
-library(sjPlot)
-library(piecewiseSEM)
-library(extrafont)
-library(plotly)
-library(webshot)
-library(RSelenium)
-library(DHARMa)
-library(car)
-library(boot)
 library(MyFuncs)
-library(dplyr)
 
 ```
 
@@ -71,9 +55,7 @@ Our models are not mutually exclusive and we have no issue with power. Therefore
 
 ```{r}
 
-library(spaMM)
-
-full_mod <- fitme(Vacated ~ log(Median3) * Year_group + Status + (1|Sub_Area), family = "binomial", data = VacatedTerritories, method = "PQL/L")
+full_mod <- spaMM::fitme(Vacated ~ log(Median3) * Year_group + Status + (1|Sub_Area), family = "binomial", data = VacatedTerritories, method = "PQL/L")
 
 ```
 
@@ -81,7 +63,7 @@ The only reason why we wouldn't do this is if there were issues with VIF.
 
 ```{r}
 
-vif(glm(Vacated ~ log(Median3) + Year_group + Status, family = "binomial", data = VacatedTerritories))
+car::vif(glm(Vacated ~ log(Median3) + Year_group + Status, family = "binomial", data = VacatedTerritories))
 
 ```
 
@@ -93,9 +75,9 @@ Our variables have reasonable VIF levels. Therefore, we can include them with no
 
 set.seed(666)
 
-simResiduals <- simulateResiduals(fittedModel = full_mod, n = 5000)
+simResiduals <- DHARMa::simulateResiduals(fittedModel = full_mod, n = 5000)
 
-plotSimulatedResiduals(simulationOutput = simResiduals)
+DHARMa::plotSimulatedResiduals(simulationOutput = simResiduals)
 
 ```
 
@@ -104,8 +86,6 @@ Seems ok.
 With plotly
 
 ```{r, fig.width = 7, fig.height = 5}
-
-library(plotly)
 
 new_dat <- expand.grid(Median3 = seq(min(VacatedTerritories$Median3),
                                      max(VacatedTerritories$Median3), length.out = 100),
@@ -118,6 +98,8 @@ new_dat$pred <- as.numeric(predict(full_mod, newdata = new_dat, re.form = NA)[, 
 new_dat$Median2 <- back.transform(x = new_dat$Median3,
                                   y = VacatedTerritories$Median2,
                                   type = "standard.log")
+
+require(plotly)
 
 (Fig3 <- plot_ly(new_dat, x = ~Year_group, y = ~Median2, z = ~pred, type = "contour", showlegend = F, 
         hoverlabel = list(font =  list(family = "Ubuntu")),
@@ -152,17 +134,15 @@ To do this, we will refit our model with lme4 because the confint method with sp
 
 ```{r}
 
-library(kableExtra)
-
-CI_mod <- glmer(Vacated ~ log(Median3) * Year_group + Status + (1|Sub_Area),
+CI_mod <- lme4::glmer(Vacated ~ log(Median3) * Year_group + Status + (1|Sub_Area),
                   data = VacatedTerritories, family = binomial(logit))
 
 CIs <- as.data.frame(cbind(confint(CI_mod, method = "Wald")[-1, ],
              confint(CI_mod, level = 0.995, method = "Wald")[-1, ])) %>%
   mutate(CI95 = paste(round(`2.5 %`, 4), round(`97.5 %`, 4), sep = "/"),
          CI995 = paste(round(`0.25 %`, 4), round(`99.75 %`, 4), sep = "/"),
-         Estimate = format(as.numeric(fixef(CI_mod))),
-         Variable = names(fixef(CI_mod))) %>% 
+         Estimate = format(as.numeric(spaMM::fixef(CI_mod))),
+         Variable = names(spaMM::fixef(CI_mod))) %>% 
   dplyr::select(Variable, Estimate, CI95, CI995)
 
 CI_25ha <- CIs %>% 
@@ -176,14 +156,12 @@ Add this to our CI estimates.
 
 ```{r}
 
-library(kableExtra)
-
 R2 <- MuMIn::r.squaredGLMM(CI_mod)
 
 CI_25ha %>% 
   mutate(R2m = round(R2[1, "R2m"], 2),
          R2c = round(R2[1, "R2c"], 2)) %>% 
-  kable() %>% 
-  kable_styling(bootstrap_options = "bordered")
+  kableExtra::kable() %>% 
+  kableExtra::kable_styling(bootstrap_options = "bordered")
 
 ```

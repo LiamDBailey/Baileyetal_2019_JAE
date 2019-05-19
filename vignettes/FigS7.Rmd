@@ -16,12 +16,6 @@ Load ggplot themes
 devtools::load_all()
 devtools::install_github("LiamDBailey/MyFuncs", upgrade = "never")
 
-library(rgeos)
-library(rgdal)
-library(raster)
-library(ggplot2)
-library(dplyr)
-library(extrafont)
 library(MyFuncs)
 
 ```
